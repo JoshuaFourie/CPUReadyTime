@@ -13,6 +13,21 @@ from pathlib import Path
 import re
 import threading
 
+try:
+    from reportlab.lib.pagesizes import letter, A4
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak, Image
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.lib.colors import Color, blue, red, green, orange, black, white, grey
+    from reportlab.lib.units import inch
+    from reportlab.lib import colors
+    from reportlab.pdfgen import canvas
+    from reportlab.platypus.tableofcontents import TableOfContents
+    import io
+    import base64
+    PDF_AVAILABLE = True
+except ImportError:
+    PDF_AVAILABLE = False
+
 # vCenter integration imports
 try:
     from pyVim.connect import SmartConnect, Disconnect
@@ -510,6 +525,352 @@ class ModernCPUAnalyzer:
         
         # Configure scrollbars
         self.preview_tree.configure(yscrollcommand=v_scrollbar.set, xscrollcommand=h_scrollbar.set)
+
+    def export_comprehensive_pdf_report(self):
+        """Export comprehensive PDF report with all analysis results"""
+        if not PDF_AVAILABLE:
+            messagebox.showerror("PDF Export Unavailable", 
+                            "PDF export requires additional packages:\n\n"
+                            "pip install reportlab\n\n"
+                            "Please install and restart the application.")
+            return
+        
+        if self.processed_data is None:
+            messagebox.showwarning("No Data", "Please calculate CPU Ready % first")
+            return
+        
+        # File selection dialog
+        filename = filedialog.asksaveasfilename(
+            defaultextension=".pdf",
+            filetypes=[("PDF files", "*.pdf"), ("All files", "*.*")],
+            title="Export Comprehensive PDF Report"
+        )
+        
+        if not filename:
+            return
+        
+        self.show_progress("Generating comprehensive PDF report...")
+        
+        try:
+            # Create PDF document
+            doc = SimpleDocTemplate(filename, pagesize=A4, 
+                                topMargin=0.75*inch, bottomMargin=0.75*inch,
+                                leftMargin=0.75*inch, rightMargin=0.75*inch)
+            
+            # Get styles
+            styles = getSampleStyleSheet()
+            
+            # Create custom styles
+            title_style = ParagraphStyle('CustomTitle',
+                                    parent=styles['Heading1'],
+                                    fontSize=24,
+                                    spaceAfter=30,
+                                    textColor=colors.darkblue,
+                                    alignment=1)  # Center alignment
+            
+            heading_style = ParagraphStyle('CustomHeading',
+                                        parent=styles['Heading2'],
+                                        fontSize=16,
+                                        spaceBefore=20,
+                                        spaceAfter=12,
+                                        textColor=colors.darkblue,
+                                        borderWidth=1,
+                                        borderColor=colors.lightgrey,
+                                        borderPadding=5,
+                                        backColor=colors.lightgrey)
+            
+            subheading_style = ParagraphStyle('CustomSubHeading',
+                                            parent=styles['Heading3'],
+                                            fontSize=14,
+                                            spaceBefore=15,
+                                            spaceAfter=8,
+                                            textColor=colors.darkred)
+            
+            # Build story (content)
+            story = []
+            
+            # Title Page
+            story.append(Paragraph("🖥️ vCenter CPU Ready Analysis Report", title_style))
+            story.append(Spacer(1, 0.5*inch))
+            
+            # Executive Summary Box
+            exec_summary = self.generate_executive_summary()
+            story.append(Paragraph("📊 Executive Summary", heading_style))
+            
+            summary_data = [
+                ["Metric", "Value"],
+                ["Analysis Date", datetime.now().strftime('%Y-%m-%d %H:%M:%S')],
+                ["Total Hosts Analyzed", str(len(self.processed_data['Hostname'].unique()))],
+                ["Analysis Period", self.current_interval],
+                ["Total Records", f"{len(self.processed_data):,}"],
+                ["Date Range", f"{self.processed_data['Time'].min().strftime('%Y-%m-%d')} to {self.processed_data['Time'].max().strftime('%Y-%m-%d')}"],
+                ["Critical Hosts", str(exec_summary['critical_hosts'])],
+                ["Warning Hosts", str(exec_summary['warning_hosts'])],
+                ["Healthy Hosts", str(exec_summary['healthy_hosts'])],
+                ["Overall Health", exec_summary['overall_health']]
+            ]
+            
+            summary_table = Table(summary_data, colWidths=[2.5*inch, 2*inch])
+            summary_table.setStyle(TableStyle([
+                ('BACKGROUND', (0, 0), (-1, 0), colors.darkblue),
+                ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+                ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+                ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                ('FONTSIZE', (0, 0), (-1, 0), 12),
+                ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
+                ('BACKGROUND', (0, 1), (-1, -1), colors.beige),
+                ('GRID', (0, 0), (-1, -1), 1, colors.black)
+            ]))
+            story.append(summary_table)
+            story.append(Spacer(1, 0.3*inch))
+            
+            # Key Findings
+            story.append(Paragraph("🎯 Key Findings", heading_style))
+            findings = exec_summary['key_findings']
+            for finding in findings:
+                story.append(Paragraph(f"• {finding}", styles['Normal']))
+            story.append(Spacer(1, 0.2*inch))
+            
+            # Page break before detailed analysis
+            story.append(PageBreak())
+            
+            # Detailed Host Analysis
+            story.append(Paragraph("📈 Detailed Host Performance Analysis", heading_style))
+            
+            # Create detailed host table
+            host_data = []
+            host_data.append(["Host", "Avg CPU Ready %", "Max CPU Ready %", "Health Score", "Status", "Records"])
+            
+            for hostname in sorted(self.processed_data['Hostname'].unique()):
+                host_df = self.processed_data[self.processed_data['Hostname'] == hostname]
+                avg_cpu = host_df['CPU_Ready_Percent'].mean()
+                max_cpu = host_df['CPU_Ready_Percent'].max()
+                health_score = self.calculate_health_score(avg_cpu, max_cpu, host_df['CPU_Ready_Percent'].std())
+                
+                if avg_cpu >= self.critical_threshold.get():
+                    status = "Critical"
+                    status_color = colors.red
+                elif avg_cpu >= self.warning_threshold.get():
+                    status = "Warning"
+                    status_color = colors.orange
+                else:
+                    status = "Healthy"
+                    status_color = colors.green
+                
+                host_data.append([
+                    hostname,
+                    f"{avg_cpu:.2f}%",
+                    f"{max_cpu:.2f}%",
+                    f"{health_score:.0f}/100",
+                    status,
+                    f"{len(host_df):,}"
+                ])
+            
+            host_table = Table(host_data, colWidths=[1.8*inch, 1*inch, 1*inch, 1*inch, 0.8*inch, 0.8*inch])
+            host_table.setStyle(TableStyle([
+                ('BACKGROUND', (0, 0), (-1, 0), colors.darkblue),
+                ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+                ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+                ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                ('FONTSIZE', (0, 0), (-1, 0), 10),
+                ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
+                ('BACKGROUND', (0, 1), (-1, -1), colors.beige),
+                ('GRID', (0, 0), (-1, -1), 1, colors.black),
+                ('FONTSIZE', (0, 1), (-1, -1), 9)
+            ]))
+            
+            # Add conditional formatting for status
+            for i, row in enumerate(host_data[1:], 1):
+                if "Critical" in row[4]:
+                    host_table.setStyle(TableStyle([('TEXTCOLOR', (4, i), (4, i), colors.red)]))
+                elif "Warning" in row[4]:
+                    host_table.setStyle(TableStyle([('TEXTCOLOR', (4, i), (4, i), colors.orange)]))
+                else:
+                    host_table.setStyle(TableStyle([('TEXTCOLOR', (4, i), (4, i), colors.green)]))
+            
+            story.append(host_table)
+            story.append(Spacer(1, 0.3*inch))
+            
+            # Performance Statistics
+            story.append(Paragraph("📊 Performance Statistics", subheading_style))
+            
+            overall_avg = self.processed_data['CPU_Ready_Percent'].mean()
+            overall_max = self.processed_data['CPU_Ready_Percent'].max()
+            overall_min = self.processed_data['CPU_Ready_Percent'].min()
+            overall_std = self.processed_data['CPU_Ready_Percent'].std()
+            
+            stats_text = f"""
+            <b>Overall Performance Metrics:</b><br/>
+            • Average CPU Ready: {overall_avg:.2f}%<br/>
+            • Maximum CPU Ready: {overall_max:.2f}%<br/>
+            • Minimum CPU Ready: {overall_min:.2f}%<br/>
+            • Standard Deviation: {overall_std:.2f}%<br/>
+            • Coefficient of Variation: {(overall_std/overall_avg)*100:.1f}%<br/>
+            <br/>
+            <b>Threshold Analysis:</b><br/>
+            • Warning Threshold: {self.warning_threshold.get()}%<br/>
+            • Critical Threshold: {self.critical_threshold.get()}%<br/>
+            • Hosts exceeding warning: {len([h for h in self.processed_data['Hostname'].unique() if self.processed_data[self.processed_data['Hostname']==h]['CPU_Ready_Percent'].mean() >= self.warning_threshold.get()])}<br/>
+            • Hosts exceeding critical: {len([h for h in self.processed_data['Hostname'].unique() if self.processed_data[self.processed_data['Hostname']==h]['CPU_Ready_Percent'].mean() >= self.critical_threshold.get()])}
+            """
+            story.append(Paragraph(stats_text, styles['Normal']))
+            story.append(Spacer(1, 0.3*inch))
+            
+            # Add chart if available
+            story.append(Paragraph("📈 Performance Timeline Chart", subheading_style))
+            chart_image = self.generate_chart_for_pdf()
+            if chart_image:
+                story.append(chart_image)
+                story.append(Spacer(1, 0.2*inch))
+            
+            # Page break before recommendations
+            story.append(PageBreak())
+            
+            # Add AI Recommendations if available
+            if hasattr(self, 'current_recommendations') and self.current_recommendations:
+                story.append(Paragraph("🤖 AI Consolidation Recommendations", heading_style))
+                
+                rec_data = [["Rank", "Host", "Score", "Risk Level", "Avg CPU Ready %"]]
+                for i, rec in enumerate(self.current_recommendations[:5], 1):  # Top 5
+                    risk_level = "Low" if rec['metrics']['avg_cpu_ready'] < 2.0 else "Medium" if rec['metrics']['avg_cpu_ready'] < 5.0 else "High"
+                    rec_data.append([
+                        str(i),
+                        rec['hostname'],
+                        f"{rec['consolidation_score']:.0f}/100",
+                        risk_level,
+                        f"{rec['metrics']['avg_cpu_ready']:.2f}%"
+                    ])
+                
+                rec_table = Table(rec_data, colWidths=[0.5*inch, 2*inch, 1*inch, 1*inch, 1.2*inch])
+                rec_table.setStyle(TableStyle([
+                    ('BACKGROUND', (0, 0), (-1, 0), colors.darkgreen),
+                    ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+                    ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+                    ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                    ('FONTSIZE', (0, 0), (-1, 0), 10),
+                    ('BACKGROUND', (0, 1), (-1, -1), colors.lightgreen),
+                    ('GRID', (0, 0), (-1, -1), 1, colors.black)
+                ]))
+                story.append(rec_table)
+                story.append(Spacer(1, 0.3*inch))
+            
+            # Recommendations and Best Practices
+            story.append(Paragraph("💡 Recommendations & Best Practices", heading_style))
+            
+            recommendations_text = """
+            <b>Infrastructure Optimization Recommendations:</b><br/>
+            • Monitor hosts with CPU Ready > 5% for potential resource contention<br/>
+            • Consider consolidating hosts with consistently low CPU Ready values<br/>
+            • Implement DRS rules for balanced workload distribution<br/>
+            • Regular performance monitoring and capacity planning<br/>
+            <br/>
+            <b>Best Practices:</b><br/>
+            • Maintain CPU Ready below 5% for optimal performance<br/>
+            • Plan for peak usage periods and growth<br/>
+            • Regular health assessments and threshold reviews<br/>
+            • Document all infrastructure changes and optimizations
+            """
+            story.append(Paragraph(recommendations_text, styles['Normal']))
+            story.append(Spacer(1, 0.3*inch))
+            
+            # Footer information
+            story.append(Paragraph("📋 Report Details", subheading_style))
+            footer_text = f"""
+            <b>Generated by:</b> vCenter CPU Ready Analyzer v2.0<br/>
+            <b>Report Generated:</b> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}<br/>
+            <b>Analysis Method:</b> VMware vCenter Performance Data Analysis<br/>
+            <b>Developed by:</b> Joshua Fourie (joshua.fourie@outlook.com)
+            """
+            story.append(Paragraph(footer_text, styles['Normal']))
+            
+            # Build PDF
+            doc.build(story)
+            
+            messagebox.showinfo("PDF Export Complete", 
+                            f"Comprehensive PDF report exported successfully!\n\n"
+                            f"Location: {filename}\n"
+                            f"Pages: Multiple\n"
+                            f"Content: Complete analysis with charts and recommendations")
+            
+        except Exception as e:
+            messagebox.showerror("PDF Export Error", f"Failed to generate PDF report:\n{str(e)}")
+        finally:
+            self.hide_progress()
+
+    def generate_executive_summary(self):
+        """Generate executive summary data for PDF report"""
+        if self.processed_data is None:
+            return {}
+        
+        unique_hosts = self.processed_data['Hostname'].unique()
+        
+        critical_hosts = 0
+        warning_hosts = 0
+        healthy_hosts = 0
+        key_findings = []
+        
+        for hostname in unique_hosts:
+            host_data = self.processed_data[self.processed_data['Hostname'] == hostname]
+            avg_cpu = host_data['CPU_Ready_Percent'].mean()
+            
+            if avg_cpu >= self.critical_threshold.get():
+                critical_hosts += 1
+            elif avg_cpu >= self.warning_threshold.get():
+                warning_hosts += 1
+            else:
+                healthy_hosts += 1
+        
+        # Generate key findings
+        total_hosts = len(unique_hosts)
+        overall_avg = self.processed_data['CPU_Ready_Percent'].mean()
+        
+        if critical_hosts > 0:
+            key_findings.append(f"{critical_hosts} hosts require immediate attention (>={self.critical_threshold.get()}% CPU Ready)")
+            overall_health = "Needs Attention"
+        elif warning_hosts > 0:
+            key_findings.append(f"{warning_hosts} hosts need monitoring (>={self.warning_threshold.get()}% CPU Ready)")
+            overall_health = "Good with Monitoring"
+        else:
+            key_findings.append("All hosts performing within healthy parameters")
+            overall_health = "Excellent"
+        
+        key_findings.append(f"Overall average CPU Ready: {overall_avg:.2f}%")
+        
+        if healthy_hosts > total_hosts * 0.7:
+            key_findings.append(f"{healthy_hosts} hosts are good consolidation candidates")
+        
+        if overall_avg < 2.0:
+            key_findings.append("Infrastructure shows potential for consolidation opportunities")
+        
+        return {
+            'critical_hosts': critical_hosts,
+            'warning_hosts': warning_hosts,
+            'healthy_hosts': healthy_hosts,
+            'overall_health': overall_health,
+            'key_findings': key_findings
+        }
+
+    def generate_chart_for_pdf(self):
+        """Generate chart image for PDF inclusion"""
+        try:
+            # Save current chart to image
+            import tempfile
+            import os
+            
+            with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp_file:
+                self.fig.savefig(tmp_file.name, dpi=150, bbox_inches='tight', 
+                            facecolor='white', edgecolor='none')
+                
+                # Create reportlab Image
+                chart_img = Image(tmp_file.name, width=6*inch, height=3*inch)
+                
+                # Clean up temp file
+                os.unlink(tmp_file.name)
+                
+                return chart_img
+        except Exception as e:
+            print(f"DEBUG: Could not generate chart for PDF: {e}")
+            return None
 
     def create_analysis_tab(self):
         """Create analysis tab with PACK management"""
@@ -1109,39 +1470,99 @@ class ModernCPUAnalyzer:
         self.canvas.get_tk_widget().grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
         
     def create_host_management_tab(self):
-        """Create host management tab"""
+        """Create enhanced host management tab with auto-recommendations"""
         tab_frame = tk.Frame(self.notebook, bg=self.colors['bg_primary'])
         self.notebook.add(tab_frame, text="🖥️ Hosts")
         
         tab_frame.columnconfigure(0, weight=1)
-        tab_frame.rowconfigure(1, weight=1)
+        tab_frame.rowconfigure(2, weight=1)  # Results section gets most space
         
-        # Host Selection Section
-        selection_section = tk.LabelFrame(tab_frame, text="  🎯 Host Consolidation Analysis  ",
-                                        bg=self.colors['bg_primary'],
-                                        fg=self.colors['accent_blue'],
-                                        font=('Segoe UI', 10, 'bold'),
-                                        borderwidth=1,
-                                        relief='solid')
-        selection_section.pack(fill=tk.X, padx=10, pady=(10, 5))
+        # Auto-Recommendation Section (NEW)
+        auto_section = tk.LabelFrame(tab_frame, text="  🤖 AI Consolidation Recommendations  ",
+                                    bg=self.colors['bg_primary'],
+                                    fg=self.colors['accent_blue'],
+                                    font=('Segoe UI', 10, 'bold'),
+                                    borderwidth=1,
+                                    relief='solid')
+        auto_section.pack(fill=tk.X, padx=10, pady=(10, 5))
         
-        selection_content = tk.Frame(selection_section, bg=self.colors['bg_primary'])
-        selection_content.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
-        selection_content.columnconfigure(0, weight=1)
+        auto_content = tk.Frame(auto_section, bg=self.colors['bg_primary'])
+        auto_content.pack(fill=tk.X, padx=10, pady=10)
+        
+        # Auto-recommendation controls
+        auto_controls = tk.Frame(auto_content, bg=self.colors['bg_primary'])
+        auto_controls.pack(fill=tk.X, pady=(0, 10))
+        
+        # Strategy selection
+        tk.Label(auto_controls, text="Consolidation Strategy:",
+                bg=self.colors['bg_primary'], fg=self.colors['text_primary'],
+                font=('Segoe UI', 10, 'bold')).pack(side=tk.LEFT)
+        
+        self.consolidation_strategy = tk.StringVar(value="Balanced")
+        strategy_combo = ttk.Combobox(auto_controls, textvariable=self.consolidation_strategy,
+                                    values=["Conservative", "Balanced", "Aggressive", "Custom"], 
+                                    state="readonly", width=12)
+        strategy_combo.pack(side=tk.LEFT, padx=(10, 20))
+        strategy_combo.bind('<<ComboboxSelected>>', self.on_strategy_change)
+        
+        # Target reduction
+        tk.Label(auto_controls, text="Target Reduction:",
+                bg=self.colors['bg_primary'], fg=self.colors['text_primary'],
+                font=('Segoe UI', 10)).pack(side=tk.LEFT)
+        
+        self.target_reduction = tk.DoubleVar(value=20.0)
+        reduction_spin = tk.Spinbox(auto_controls, from_=5.0, to=50.0, width=8,
+                                textvariable=self.target_reduction, increment=5.0,
+                                bg=self.colors['input_bg'], fg=self.colors['text_primary'],
+                                insertbackground=self.colors['text_primary'],
+                                relief='flat', borderwidth=1)
+        reduction_spin.pack(side=tk.LEFT, padx=(5, 2))
+        
+        tk.Label(auto_controls, text="%",
+                bg=self.colors['bg_primary'], fg=self.colors['text_primary']).pack(side=tk.LEFT, padx=(0, 20))
+        
+        # Generate recommendations button
+        auto_recommend_btn = tk.Button(auto_controls, text="🤖 Generate Recommendations",
+                                    command=self.generate_auto_recommendations,
+                                    bg=self.colors['accent_blue'], fg='white',
+                                    font=('Segoe UI', 9, 'bold'),
+                                    relief='flat', borderwidth=0,
+                                    padx=15, pady=5)
+        auto_recommend_btn.pack(side=tk.LEFT)
+        
+        # Quick info
+        info_label = tk.Label(auto_content, 
+                            text="💡 AI will analyze performance patterns, workload distribution, and consolidation risk to recommend optimal hosts for removal",
+                            bg=self.colors['bg_primary'], fg=self.colors['text_secondary'],
+                            font=('Segoe UI', 9), wraplength=800)
+        info_label.pack(anchor=tk.W)
+        
+        # Manual Selection Section (Enhanced)
+        manual_section = tk.LabelFrame(tab_frame, text="  👤 Manual Host Selection  ",
+                                    bg=self.colors['bg_primary'],
+                                    fg=self.colors['accent_blue'],
+                                    font=('Segoe UI', 10, 'bold'),
+                                    borderwidth=1,
+                                    relief='solid')
+        manual_section.pack(fill=tk.X, padx=10, pady=5)
+        
+        manual_content = tk.Frame(manual_section, bg=self.colors['bg_primary'])
+        manual_content.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        manual_content.columnconfigure(0, weight=1)
         
         # Instructions
-        tk.Label(selection_content, text="Select hosts to Analyse removal impact:",
+        tk.Label(manual_content, text="Select hosts manually to analyze removal impact:",
                 bg=self.colors['bg_primary'],
-                fg=self.colors['accent_blue'],
-                font=('Segoe UI', 11, 'bold')).pack(anchor=tk.W, pady=(0, 10))
+                fg=self.colors['text_primary'],
+                font=('Segoe UI', 10, 'bold')).pack(anchor=tk.W, pady=(0, 10))
         
-        # Host list frame
-        list_frame = tk.Frame(selection_content, bg=self.colors['bg_primary'])
-        list_frame.pack(fill=tk.BOTH, expand=True)
+        # Host list frame with enhanced display
+        list_frame = tk.Frame(manual_content, bg=self.colors['bg_primary'])
+        list_frame.pack(fill=tk.X)
         list_frame.columnconfigure(0, weight=1)
         
-        # Listbox with modern styling
-        self.hosts_listbox = self.create_dark_listbox(list_frame, selectmode=tk.MULTIPLE, height=8)
+        # Enhanced listbox with performance indicators
+        self.hosts_listbox = self.create_enhanced_host_listbox(list_frame)
         self.hosts_listbox.grid(row=0, column=0, sticky=(tk.W, tk.E), padx=(0, 10))
         
         hosts_scrollbar = ttk.Scrollbar(list_frame, orient=tk.VERTICAL, command=self.hosts_listbox.yview)
@@ -1152,7 +1573,7 @@ class ModernCPUAnalyzer:
         button_frame = tk.Frame(list_frame, bg=self.colors['bg_primary'])
         button_frame.grid(row=0, column=2, padx=(15, 0), sticky=(tk.N))
         
-        # Control buttons with consistent styling
+        # Enhanced control buttons
         select_all_btn = tk.Button(button_frame, text="✓ Select All",
                                 command=self.select_all_hosts,
                                 bg=self.colors['bg_secondary'], fg=self.colors['text_primary'],
@@ -1167,9 +1588,17 @@ class ModernCPUAnalyzer:
                                 font=('Segoe UI', 9, 'bold'),
                                 relief='flat', borderwidth=0,
                                 padx=10, pady=5)
-        clear_all_btn.pack(pady=(0, 15), fill=tk.X)
+        clear_all_btn.pack(pady=(0, 5), fill=tk.X)
         
-        analyze_btn = tk.Button(button_frame, text="🔍 Analyse Impact",
+        select_recommended_btn = tk.Button(button_frame, text="🤖 Select AI Picks",
+                                        command=self.select_recommended_hosts,
+                                        bg=self.colors['warning'], fg='white',
+                                        font=('Segoe UI', 9, 'bold'),
+                                        relief='flat', borderwidth=0,
+                                        padx=10, pady=5)
+        select_recommended_btn.pack(pady=(0, 15), fill=tk.X)
+        
+        analyze_btn = tk.Button(button_frame, text="🔍 Analyze Impact",
                             command=self.analyze_multiple_removal_impact,
                             bg=self.colors['accent_blue'], fg='white',
                             font=('Segoe UI', 9, 'bold'),
@@ -1177,8 +1606,8 @@ class ModernCPUAnalyzer:
                             padx=10, pady=5)
         analyze_btn.pack(fill=tk.X)
         
-        # Results Section
-        results_section = tk.LabelFrame(tab_frame, text="  📊 Impact Analysis Results  ",
+        # Results Section (Enhanced)
+        results_section = tk.LabelFrame(tab_frame, text="  📊 Consolidation Analysis Results  ",
                                     bg=self.colors['bg_primary'],
                                     fg=self.colors['accent_blue'],
                                     font=('Segoe UI', 10, 'bold'),
@@ -1191,7 +1620,7 @@ class ModernCPUAnalyzer:
         results_content.columnconfigure(0, weight=1)
         results_content.rowconfigure(0, weight=1)
         
-        # Results text with modern styling
+        # Enhanced results text widget
         self.impact_text = self.create_dark_text_widget(results_content, wrap=tk.WORD, padx=10, pady=10)
         
         impact_scrollbar = ttk.Scrollbar(results_content, orient=tk.VERTICAL, command=self.impact_text.yview)
@@ -1200,6 +1629,995 @@ class ModernCPUAnalyzer:
         self.impact_text.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
         impact_scrollbar.grid(row=0, column=1, sticky=(tk.N, tk.S))
         
+        # Initialize with helpful content
+        self.show_consolidation_welcome_message()
+
+    def create_enhanced_host_listbox(self, parent):
+        """Create enhanced listbox that shows host performance indicators - FIXED"""
+        # FIXED: Don't use a container frame that might hide the listbox
+        listbox = tk.Listbox(parent,
+                            bg=self.colors['bg_secondary'],
+                            fg=self.colors['text_primary'],
+                            selectbackground=self.colors['selection'],
+                            selectforeground=self.colors['text_primary'],
+                            relief='solid',
+                            borderwidth=1,
+                            highlightcolor=self.colors['accent_blue'],
+                            highlightbackground=self.colors['border'],
+                            highlightthickness=1,
+                            font=('Consolas', 10),
+                            selectmode=tk.MULTIPLE,
+                            height=8)
+        
+        # REMOVED: Don't pack inside container, return the listbox directly
+        return listbox
+
+    def on_strategy_change(self, event=None):
+        """Handle consolidation strategy change"""
+        strategy = self.consolidation_strategy.get()
+        
+        # Update target reduction based on strategy
+        strategy_defaults = {
+            "Conservative": 10.0,
+            "Balanced": 20.0,
+            "Aggressive": 35.0,
+            "Custom": self.target_reduction.get()
+        }
+        
+        if strategy != "Custom":
+            self.target_reduction.set(strategy_defaults[strategy])
+
+    def generate_auto_recommendations(self):
+        """Generate AI-powered consolidation recommendations"""
+        if self.processed_data is None:
+            messagebox.showwarning("No Data", "Please calculate CPU Ready % first")
+            return
+        
+        self.show_progress("🤖 Generating AI recommendations...")
+        
+        try:
+            strategy = self.consolidation_strategy.get()
+            target_reduction = self.target_reduction.get()
+            
+            # Analyze all hosts and generate recommendations
+            recommendations = self.analyze_consolidation_candidates(strategy, target_reduction)
+            
+            # Display results
+            self.display_auto_recommendations(recommendations)
+            
+            # Store recommendations for easy selection
+            self.current_recommendations = recommendations
+            
+        except Exception as e:
+            messagebox.showerror("Recommendation Error", f"Error generating recommendations:\n{str(e)}")
+        finally:
+            self.hide_progress()
+
+    def analyze_consolidation_candidates(self, strategy="Balanced", target_reduction=20.0):
+        """
+        Intelligent analysis to identify best consolidation candidates
+        Returns ranked list of hosts with detailed reasoning
+        """
+        if self.processed_data is None:
+            return []
+        
+        hosts = []
+        total_hosts = len(self.processed_data['Hostname'].unique())
+        
+        print(f"DEBUG: Analyzing {total_hosts} hosts for consolidation with {strategy} strategy")
+        
+        # Analyze each host
+        for hostname in self.processed_data['Hostname'].unique():
+            host_data = self.processed_data[self.processed_data['Hostname'] == hostname]
+            
+            # Calculate comprehensive metrics
+            metrics = self.calculate_host_metrics(host_data, hostname)
+            
+            # Calculate consolidation suitability score
+            consolidation_score = self.calculate_consolidation_score(metrics, strategy)
+            
+            hosts.append({
+                'hostname': hostname,
+                'metrics': metrics,
+                'consolidation_score': consolidation_score,
+                'recommendation_reasons': self.generate_recommendation_reasons(metrics, strategy)
+            })
+        
+        # Sort by consolidation suitability (higher score = better candidate)
+        hosts.sort(key=lambda x: x['consolidation_score'], reverse=True)
+        
+        # Determine how many hosts to recommend based on target reduction
+        target_count = max(1, int((target_reduction / 100) * total_hosts))
+        target_count = min(target_count, total_hosts - 1)  # Always keep at least 1 host
+        
+        # Apply strategy-specific filtering
+        recommendations = self.apply_strategy_filtering(hosts, strategy, target_count)
+        
+        print(f"DEBUG: Recommending {len(recommendations)} hosts for removal out of {total_hosts}")
+        
+        return recommendations
+
+    def calculate_host_metrics(self, host_data, hostname):
+        """Calculate comprehensive metrics for a host"""
+        cpu_values = host_data['CPU_Ready_Percent']
+        
+        metrics = {
+            # Basic CPU Ready metrics
+            'avg_cpu_ready': cpu_values.mean(),
+            'max_cpu_ready': cpu_values.max(),
+            'min_cpu_ready': cpu_values.min(),
+            'std_cpu_ready': cpu_values.std(),
+            'median_cpu_ready': cpu_values.median(),
+            
+            # Performance consistency
+            'coefficient_variation': (cpu_values.std() / cpu_values.mean()) if cpu_values.mean() > 0 else 0,
+            'percentile_95': cpu_values.quantile(0.95),
+            'percentile_99': cpu_values.quantile(0.99),
+            
+            # Workload patterns
+            'low_utilization_periods': len(cpu_values[cpu_values < 1.0]) / len(cpu_values) * 100,
+            'high_utilization_periods': len(cpu_values[cpu_values > 10.0]) / len(cpu_values) * 100,
+            'critical_periods': len(cpu_values[cpu_values > self.critical_threshold.get()]) / len(cpu_values) * 100,
+            
+            # Data quality
+            'data_points': len(cpu_values),
+            'zero_values': len(cpu_values[cpu_values == 0]),
+            
+            # Health score
+            'health_score': self.calculate_health_score(
+                cpu_values.mean(), 
+                cpu_values.max(), 
+                cpu_values.std()
+            )
+        }
+        
+        # Time-based analysis if enough data
+        if len(host_data) > 24:
+            try:
+                host_data_copy = host_data.copy()
+                host_data_copy['Hour'] = host_data_copy['Time'].dt.hour
+                host_data_copy['DayOfWeek'] = host_data_copy['Time'].dt.dayofweek
+                
+                # Peak hours analysis
+                hourly_avg = host_data_copy.groupby('Hour')['CPU_Ready_Percent'].mean()
+                metrics['peak_hour'] = hourly_avg.idxmax()
+                metrics['peak_hour_value'] = hourly_avg.max()
+                metrics['off_peak_avg'] = hourly_avg.quantile(0.25)
+                
+                # Weekend vs weekday
+                weekday_avg = host_data_copy[host_data_copy['DayOfWeek'] < 5]['CPU_Ready_Percent'].mean()
+                weekend_avg = host_data_copy[host_data_copy['DayOfWeek'] >= 5]['CPU_Ready_Percent'].mean()
+                metrics['weekday_avg'] = weekday_avg if not pd.isna(weekday_avg) else metrics['avg_cpu_ready']
+                metrics['weekend_avg'] = weekend_avg if not pd.isna(weekend_avg) else metrics['avg_cpu_ready']
+                
+            except Exception as e:
+                print(f"DEBUG: Time analysis error for {hostname}: {e}")
+        
+        return metrics
+
+    def calculate_consolidation_score(self, metrics, strategy):
+        """
+        Calculate how suitable a host is for consolidation removal
+        Higher score = better candidate for removal
+        """
+        score = 0
+        
+        # Low CPU Ready usage (primary factor)
+        avg_cpu = metrics['avg_cpu_ready']
+        if avg_cpu < 1.0:
+            score += 40  # Very low usage
+        elif avg_cpu < 2.0:
+            score += 30  # Low usage
+        elif avg_cpu < 5.0:
+            score += 20  # Moderate usage
+        elif avg_cpu < 10.0:
+            score += 10  # Higher usage
+        else:
+            score -= 20  # High usage - not good candidate
+        
+        # Consistency (low variation is good for consolidation)
+        cv = metrics['coefficient_variation']
+        if cv < 0.3:
+            score += 15  # Very consistent
+        elif cv < 0.6:
+            score += 10  # Moderately consistent
+        elif cv < 1.0:
+            score += 5   # Somewhat consistent
+        else:
+            score -= 10  # Highly variable - risky
+        
+        # Low peak usage
+        if metrics['percentile_95'] < 5.0:
+            score += 15
+        elif metrics['percentile_95'] < 10.0:
+            score += 10
+        elif metrics['percentile_95'] > 20.0:
+            score -= 15
+        
+        # High percentage of low utilization periods
+        low_util = metrics['low_utilization_periods']
+        if low_util > 80:
+            score += 20
+        elif low_util > 60:
+            score += 15
+        elif low_util > 40:
+            score += 10
+        
+        # Penalty for critical periods
+        critical_periods = metrics['critical_periods']
+        if critical_periods > 10:
+            score -= 30  # Frequently critical
+        elif critical_periods > 5:
+            score -= 20
+        elif critical_periods > 1:
+            score -= 10
+        
+        # Health score factor
+        health_score = metrics['health_score']
+        if health_score > 90:
+            score += 10  # Very healthy, good candidate
+        elif health_score > 80:
+            score += 5
+        elif health_score < 50:
+            score -= 15  # Unhealthy, might need investigation
+        
+        # Strategy-specific adjustments
+        if strategy == "Conservative":
+            # More conservative - only recommend very safe candidates
+            if avg_cpu > 3.0 or critical_periods > 0:
+                score -= 25
+            if metrics['high_utilization_periods'] > 5:
+                score -= 15
+        
+        elif strategy == "Aggressive":
+            # More aggressive - willing to take more risk
+            score += 10  # Base bonus for aggressive strategy
+            if avg_cpu < 10.0:  # Expand acceptable range
+                score += 10
+        
+        # Weekend vs weekday consideration
+        if 'weekend_avg' in metrics and 'weekday_avg' in metrics:
+            weekend_diff = abs(metrics['weekend_avg'] - metrics['weekday_avg'])
+            if weekend_diff < 1.0:
+                score += 5  # Consistent across week
+        
+        return max(0, score)  # Ensure non-negative score
+
+    def apply_strategy_filtering(self, hosts, strategy, target_count):
+        """Apply strategy-specific filtering to host recommendations"""
+        
+        if strategy == "Conservative":
+            # Only recommend hosts with very low risk
+            safe_hosts = [h for h in hosts if (
+                h['metrics']['avg_cpu_ready'] < 3.0 and
+                h['metrics']['critical_periods'] == 0 and
+                h['metrics']['percentile_95'] < 8.0
+            )]
+            return safe_hosts[:target_count]
+        
+        elif strategy == "Balanced":
+            # Balance risk and reduction goals
+            good_candidates = [h for h in hosts if (
+                h['metrics']['avg_cpu_ready'] < 5.0 and
+                h['metrics']['critical_periods'] < 2.0 and
+                h['consolidation_score'] > 30
+            )]
+            return good_candidates[:target_count]
+        
+        elif strategy == "Aggressive":
+            # More willing to take risks for higher reduction
+            candidates = [h for h in hosts if (
+                h['metrics']['avg_cpu_ready'] < 8.0 and
+                h['metrics']['critical_periods'] < 5.0
+            )]
+            return candidates[:target_count]
+        
+        else:  # Custom
+            # Use raw scores
+            return hosts[:target_count]
+
+    def generate_recommendation_reasons(self, metrics, strategy):
+        """Generate human-readable reasons for recommendation"""
+        reasons = []
+        
+        avg_cpu = metrics['avg_cpu_ready']
+        if avg_cpu < 1.0:
+            reasons.append(f"Very low CPU Ready usage ({avg_cpu:.1f}%)")
+        elif avg_cpu < 3.0:
+            reasons.append(f"Low CPU Ready usage ({avg_cpu:.1f}%)")
+        
+        if metrics['low_utilization_periods'] > 70:
+            reasons.append(f"{metrics['low_utilization_periods']:.0f}% of time below 1% CPU Ready")
+        
+        if metrics['critical_periods'] == 0:
+            reasons.append("No critical performance periods")
+        elif metrics['critical_periods'] < 1:
+            reasons.append("Very few critical periods")
+        
+        if metrics['coefficient_variation'] < 0.4:
+            reasons.append("Consistent performance pattern")
+        
+        if metrics['health_score'] > 85:
+            reasons.append(f"High health score ({metrics['health_score']:.0f}/100)")
+        
+        if metrics['percentile_95'] < 5.0:
+            reasons.append(f"Low peak usage (95th percentile: {metrics['percentile_95']:.1f}%)")
+        
+        # Weekend consistency
+        if 'weekend_avg' in metrics and 'weekday_avg' in metrics:
+            diff = abs(metrics['weekend_avg'] - metrics['weekday_avg'])
+            if diff < 1.0:
+                reasons.append("Consistent usage across weekdays/weekends")
+        
+        if not reasons:
+            reasons.append("Identified as potential consolidation candidate")
+        
+        return reasons
+
+    def display_auto_recommendations(self, recommendations):
+        """Display AI recommendations in a comprehensive format"""
+        if not recommendations:
+            self.impact_text.delete(1.0, tk.END)
+            self.impact_text.insert(1.0, """🤖 AI CONSOLIDATION RECOMMENDATIONS
+    ═══════════════════════════════════════════════════
+
+    No suitable consolidation candidates found with current criteria.
+
+    Try adjusting your strategy:
+    • Use "Aggressive" for more candidates
+    • Lower the target reduction percentage
+    • Review your CPU Ready thresholds
+
+    All hosts may be actively utilized or critical to operations.""")
+            return
+        
+        strategy = self.consolidation_strategy.get()
+        target_reduction = self.target_reduction.get()
+        
+        report = f"""🤖 AI CONSOLIDATION RECOMMENDATIONS
+    ═══════════════════════════════════════════════════
+
+    Strategy: {strategy} | Target Reduction: {target_reduction}%
+    Analysis Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+
+    📊 RECOMMENDED HOSTS FOR REMOVAL ({len(recommendations)} hosts):
+
+    """
+        
+        for i, rec in enumerate(recommendations, 1):
+            hostname = rec['hostname']
+            metrics = rec['metrics']
+            score = rec['consolidation_score']
+            reasons = rec['recommendation_reasons']
+            
+            # Risk assessment
+            if metrics['avg_cpu_ready'] < 2.0 and metrics['critical_periods'] == 0:
+                risk_level = "🟢 LOW RISK"
+            elif metrics['avg_cpu_ready'] < 5.0 and metrics['critical_periods'] < 2:
+                risk_level = "🟡 MEDIUM RISK"
+            else:
+                risk_level = "🔴 HIGH RISK"
+            
+            report += f"""{i}. {hostname} - {risk_level}
+    Consolidation Score: {score:.0f}/100
+    
+    📈 Performance Metrics:
+    • Average CPU Ready: {metrics['avg_cpu_ready']:.2f}%
+    • Peak (95th percentile): {metrics['percentile_95']:.2f}%
+    • Health Score: {metrics['health_score']:.0f}/100
+    • Low utilization periods: {metrics['low_utilization_periods']:.0f}%
+    
+    💡 Why recommended:
+    {chr(10).join([f"   • {reason}" for reason in reasons])}
+    
+    ⚠️ Considerations:
+    • Critical periods: {metrics['critical_periods']:.1f}% of time
+    • Performance variability: {metrics['coefficient_variation']:.2f} (lower is better)
+    
+    """
+        
+        # Overall impact assessment
+        total_hosts = len(self.processed_data['Hostname'].unique())
+        removal_percentage = (len(recommendations) / total_hosts) * 100
+        
+        # Calculate workload redistribution
+        total_workload = 0
+        recommended_workload = 0
+        
+        for hostname in self.processed_data['Hostname'].unique():
+            host_workload = self.processed_data[self.processed_data['Hostname'] == hostname]['CPU_Ready_Sum'].sum()
+            total_workload += host_workload
+            
+            if any(rec['hostname'] == hostname for rec in recommendations):
+                recommended_workload += host_workload
+        
+        workload_redistribution = (recommended_workload / total_workload) * 100 if total_workload > 0 else 0
+        
+        report += f"""
+    📊 IMPACT ASSESSMENT:
+    ═══════════════════════════════════════════════════
+
+    Infrastructure Reduction: {removal_percentage:.1f}% ({len(recommendations)} of {total_hosts} hosts)
+    Workload to Redistribute: {workload_redistribution:.1f}%
+    Remaining Hosts: {total_hosts - len(recommendations)}
+
+    💰 ESTIMATED BENEFITS:
+    • Hardware cost savings: ~{removal_percentage:.0f}% of host costs
+    • Power/cooling reduction: ~{removal_percentage:.0f}% savings
+    • Simplified management: Fewer hosts to maintain
+    • License optimization: Potential vSphere license savings
+
+    ⚠️ IMPLEMENTATION RECOMMENDATIONS:
+    • Test workload migration in non-production first
+    • Monitor remaining hosts for 1-2 weeks post-consolidation
+    • Have rollback plan ready
+    • Consider maintenance windows for migration
+    • Update DRS/HA settings after consolidation
+
+    🚀 NEXT STEPS:
+    1. Review recommendations above
+    2. Click "🤖 Select AI Picks" to auto-select recommended hosts
+    3. Click "🔍 Analyze Impact" for detailed workload analysis
+    4. Plan migration strategy for selected hosts
+    """
+        
+        self.impact_text.delete(1.0, tk.END)
+        self.impact_text.insert(1.0, report)
+
+    def select_recommended_hosts(self):
+        """Select the AI-recommended hosts in the listbox"""
+        if not hasattr(self, 'current_recommendations') or not self.current_recommendations:
+            messagebox.showwarning("No Recommendations", 
+                                "Please generate AI recommendations first")
+            return
+        
+        # Clear current selection
+        self.hosts_listbox.selection_clear(0, tk.END)
+        
+        # Select recommended hosts
+        recommended_hostnames = [rec['hostname'] for rec in self.current_recommendations]
+        
+        for i in range(self.hosts_listbox.size()):
+            host_text = self.hosts_listbox.get(i)
+            # Extract hostname from display text (might have performance indicators)
+            hostname = host_text.split()[0] if host_text else ""
+            
+            if hostname in recommended_hostnames:
+                self.hosts_listbox.selection_set(i)
+        
+        # Show feedback
+        self.show_smart_notification(
+            f"✅ Selected {len(recommended_hostnames)} AI-recommended hosts", 3000)
+
+    def update_host_list(self):
+        """Update host selection listbox with performance indicators"""
+        print(f"DEBUG: update_host_list called")
+        if self.processed_data is None:
+            print(f"DEBUG: No processed data available")
+            return
+        
+        unique_hosts = self.processed_data['Hostname'].unique()
+        print(f"DEBUG: Found {len(unique_hosts)} unique hosts: {list(unique_hosts)}")
+        
+        # ADD THESE DEBUG LINES:
+        print(f"DEBUG: Listbox exists: {hasattr(self, 'hosts_listbox')}")
+        if hasattr(self, 'hosts_listbox'):
+            print(f"DEBUG: Listbox size before clear: {self.hosts_listbox.size()}")
+            print(f"DEBUG: Listbox widget info: {self.hosts_listbox.winfo_exists()}")
+        
+        self.hosts_listbox.delete(0, tk.END)
+        print(f"DEBUG: Listbox cleared")
+        
+        # Calculate metrics for each host for display
+        host_metrics = {}
+        for hostname in sorted(self.processed_data['Hostname'].unique()):
+            host_data = self.processed_data[self.processed_data['Hostname'] == hostname]
+            avg_cpu = host_data['CPU_Ready_Percent'].mean()
+            health_score = self.calculate_health_score(
+                avg_cpu, 
+                host_data['CPU_Ready_Percent'].max(), 
+                host_data['CPU_Ready_Percent'].std()
+            )
+            
+            # Performance indicator
+            if avg_cpu >= self.critical_threshold.get():
+                indicator = "🔴"
+            elif avg_cpu >= self.warning_threshold.get():
+                indicator = "🟡"
+            else:
+                indicator = "🟢"
+            
+            host_metrics[hostname] = {
+                'avg_cpu': avg_cpu,
+                'health_score': health_score,
+                'indicator': indicator
+            }
+        
+        # Sort hosts by consolidation suitability (if we have recommendations)
+        if hasattr(self, 'current_recommendations') and self.current_recommendations:
+            # Sort with recommended hosts first
+            recommended_hostnames = [rec['hostname'] for rec in self.current_recommendations]
+            sorted_hosts = []
+            
+            # Add recommended hosts first
+            for hostname in recommended_hostnames:
+                if hostname in host_metrics:
+                    sorted_hosts.append((hostname, True))  # True = recommended
+            
+            # Add remaining hosts
+            for hostname in sorted(host_metrics.keys()):
+                if hostname not in recommended_hostnames:
+                    sorted_hosts.append((hostname, False))  # False = not recommended
+        else:
+            # Default sort by performance (best candidates first)
+            sorted_hosts = [(hostname, False) for hostname in 
+                        sorted(host_metrics.keys(), 
+                                key=lambda h: host_metrics[h]['avg_cpu'])]
+        
+        # Populate listbox with enhanced display
+        for hostname, is_recommended in sorted_hosts:
+            metrics = host_metrics[hostname]
+            
+            # Format display string
+            if is_recommended:
+                display_text = f"{hostname} {metrics['indicator']} 🤖 {metrics['avg_cpu']:.1f}% CPU Ready (AI Pick)"
+            else:
+                display_text = f"{hostname} {metrics['indicator']} {metrics['avg_cpu']:.1f}% CPU Ready"
+            
+            self.hosts_listbox.insert(tk.END, display_text)
+            
+        print(f"DEBUG: Final listbox size: {self.hosts_listbox.size()}")
+        print(f"DEBUG: Listbox contents:")
+        for i in range(self.hosts_listbox.size()):
+            print(f"  {i}: {self.hosts_listbox.get(i)}")
+
+    def show_consolidation_welcome_message(self):
+        """Show welcome message in the consolidation results area"""
+        welcome_msg = """🖥️ HOST CONSOLIDATION ANALYSIS
+    ═══════════════════════════════════════════════════════════════════════════════════
+
+    Welcome to the AI-Powered Host Consolidation Assistant! 🤖
+
+    🚀 GETTING STARTED:
+
+    1️⃣ AUTOMATIC RECOMMENDATIONS (Recommended):
+    • Select your consolidation strategy (Conservative/Balanced/Aggressive)
+    • Set target infrastructure reduction percentage
+    • Click "🤖 Generate Recommendations" for AI analysis
+    • Review detailed recommendations and reasoning
+    • Use "🤖 Select AI Picks" to auto-select recommended hosts
+
+    2️⃣ MANUAL SELECTION (Advanced Users):
+    • Manually select hosts from the list below
+    • Each host shows performance indicators:
+        🟢 Healthy (good consolidation candidate)
+        🟡 Warning (moderate risk)
+        🔴 Critical (high risk - avoid removal)
+    • Use "🔍 Analyze Impact" for detailed analysis
+
+    🧠 AI ANALYSIS CONSIDERS:
+    ═══════════════════════════════════════════════════
+
+    📊 Performance Metrics:
+    • CPU Ready usage patterns (average, peaks, consistency)
+    • Historical performance stability
+    • Workload distribution and timing
+    • Critical performance periods
+
+    🎯 Risk Assessment:
+    • Workload redistribution impact
+    • Remaining infrastructure capacity
+    • Performance degradation risk
+    • Business continuity considerations
+
+    💰 Business Impact:
+    • Infrastructure cost savings
+    • Power and cooling reduction
+    • Management simplification
+    • License optimization opportunities
+
+    ⚙️ CONSOLIDATION STRATEGIES:
+    ═══════════════════════════════════════════════════
+
+    🛡️ CONSERVATIVE:
+    • Only recommends extremely safe candidates
+    • < 3% average CPU Ready usage
+    • Zero critical performance periods
+    • Minimal risk to operations
+
+    ⚖️ BALANCED (Recommended):
+    • Good balance of risk and savings
+    • < 5% average CPU Ready usage
+    • Minimal critical periods
+    • Moderate consolidation benefits
+
+    ⚡ AGGRESSIVE:
+    • Maximum infrastructure reduction
+    • Higher acceptable risk levels
+    • Up to 8% average CPU Ready usage
+    • Requires careful monitoring post-consolidation
+
+    🎛️ CUSTOM:
+    • Use your own target reduction percentage
+    • Manual override of safety constraints
+    • For advanced users with specific requirements
+
+    💡 BEST PRACTICES:
+    ═══════════════════════════════════════════════════
+
+    ✅ Before Consolidation:
+    • Test in non-production environment first
+    • Verify backup and recovery procedures
+    • Plan maintenance windows
+    • Update documentation
+
+    ✅ During Implementation:
+    • Monitor performance in real-time
+    • Have rollback plan ready
+    • Migrate workloads gradually
+    • Update DRS/HA cluster settings
+
+    ✅ After Consolidation:
+    • Monitor for 1-2 weeks minimum
+    • Adjust performance thresholds if needed
+    • Document new configuration
+    • Update capacity planning models
+
+    🔍 Ready to start? Generate AI recommendations or select hosts manually above! 🚀
+
+    ═══════════════════════════════════════════════════════════════════════════════════"""
+        
+        self.impact_text.delete(1.0, tk.END)
+        self.impact_text.insert(1.0, welcome_msg)
+
+    def analyze_multiple_removal_impact(self):
+        """Enhanced removal impact analysis with comprehensive metrics"""
+        if self.processed_data is None:
+            messagebox.showwarning("No Data", "Please calculate CPU Ready % first")
+            return
+        
+        selected_hosts = self.get_selected_hosts()
+        
+        if not selected_hosts:
+            messagebox.showwarning("No Selection", "Please select at least one host or use AI recommendations")
+            return
+        
+        self.show_progress("Analyzing comprehensive removal impact...")
+        
+        try:
+            # Extract hostnames from display text
+            clean_hostnames = []
+            for host_display in selected_hosts:
+                # Extract just the hostname (first word before any indicators)
+                hostname = host_display.split()[0]
+                clean_hostnames.append(hostname)
+            
+            total_hosts = len(self.processed_data['Hostname'].unique())
+            
+            if len(clean_hostnames) >= total_hosts:
+                self.impact_text.delete(1.0, tk.END)
+                self.impact_text.insert(1.0, """❌ CONSOLIDATION ERROR
+    ═══════════════════════════════════════════════════════════════════════════════════
+
+    Cannot remove all hosts - no remaining infrastructure!
+
+    Please select fewer hosts to maintain operational capability.
+    Recommended: Keep at least 2-3 hosts for redundancy and load distribution.""")
+                return
+            
+            # Perform comprehensive analysis
+            impact_analysis = self.perform_comprehensive_impact_analysis(clean_hostnames)
+            
+            # Display detailed results
+            self.display_comprehensive_impact_results(impact_analysis)
+            
+        except Exception as e:
+            messagebox.showerror("Analysis Error", f"Error analyzing removal impact:\n{str(e)}")
+        finally:
+            self.hide_progress()
+
+    def perform_comprehensive_impact_analysis(self, hostnames_to_remove):
+        """Perform detailed impact analysis for host removal"""
+        
+        # Basic metrics
+        total_hosts = len(self.processed_data['Hostname'].unique())
+        remaining_hosts = total_hosts - len(hostnames_to_remove)
+        
+        # Workload analysis
+        total_workload = self.processed_data['CPU_Ready_Sum'].sum()
+        selected_workload = self.processed_data[
+            self.processed_data['Hostname'].isin(hostnames_to_remove)
+        ]['CPU_Ready_Sum'].sum()
+        
+        workload_percentage = (selected_workload / total_workload) * 100 if total_workload > 0 else 0
+        
+        # Performance analysis
+        current_avg = self.processed_data['CPU_Ready_Percent'].mean()
+        remaining_data = self.processed_data[~self.processed_data['Hostname'].isin(hostnames_to_remove)]
+        
+        if len(remaining_data) > 0:
+            post_removal_avg = remaining_data['CPU_Ready_Percent'].mean()
+            # Estimate additional load per remaining host
+            additional_load_per_host = workload_percentage / remaining_hosts
+            estimated_new_avg = post_removal_avg + additional_load_per_host
+        else:
+            post_removal_avg = 0
+            estimated_new_avg = 0
+            additional_load_per_host = 0
+        
+        # Risk assessment
+        risk_level = "LOW"
+        risk_factors = []
+        
+        if workload_percentage > 30:
+            risk_level = "HIGH"
+            risk_factors.append("Very high workload redistribution required")
+        elif workload_percentage > 15:
+            risk_level = "MEDIUM"
+            risk_factors.append("Significant workload redistribution")
+        
+        if estimated_new_avg > self.critical_threshold.get():
+            risk_level = "HIGH"
+            risk_factors.append(f"Estimated post-consolidation performance exceeds critical threshold")
+        elif estimated_new_avg > self.warning_threshold.get():
+            if risk_level == "LOW":
+                risk_level = "MEDIUM"
+            risk_factors.append("Estimated performance may approach warning levels")
+        
+        if remaining_hosts < 2:
+            risk_level = "HIGH"
+            risk_factors.append("Insufficient redundancy (less than 2 hosts remaining)")
+        elif remaining_hosts < 3:
+            if risk_level == "LOW":
+                risk_level = "MEDIUM"
+            risk_factors.append("Limited redundancy for maintenance and failures")
+        
+        # Detailed host analysis
+        removed_hosts_analysis = []
+        remaining_hosts_analysis = []
+        
+        for hostname in hostnames_to_remove:
+            host_data = self.processed_data[self.processed_data['Hostname'] == hostname]
+            if len(host_data) > 0:
+                removed_hosts_analysis.append({
+                    'hostname': hostname,
+                    'avg_cpu': host_data['CPU_Ready_Percent'].mean(),
+                    'max_cpu': host_data['CPU_Ready_Percent'].max(),
+                    'workload_share': (host_data['CPU_Ready_Sum'].sum() / total_workload * 100) if total_workload > 0 else 0,
+                    'health_score': self.calculate_health_score(
+                        host_data['CPU_Ready_Percent'].mean(),
+                        host_data['CPU_Ready_Percent'].max(),
+                        host_data['CPU_Ready_Percent'].std()
+                    )
+                })
+        
+        for hostname in self.processed_data['Hostname'].unique():
+            if hostname not in hostnames_to_remove:
+                host_data = self.processed_data[self.processed_data['Hostname'] == hostname]
+                remaining_hosts_analysis.append({
+                    'hostname': hostname,
+                    'current_avg_cpu': host_data['CPU_Ready_Percent'].mean(),
+                    'current_max_cpu': host_data['CPU_Ready_Percent'].max(),
+                    'estimated_new_avg': host_data['CPU_Ready_Percent'].mean() + additional_load_per_host,
+                    'capacity_utilization': ((host_data['CPU_Ready_Percent'].mean() + additional_load_per_host) / 20) * 100  # Assume 20% is full capacity
+                })
+        
+        # Calculate financial impact
+        cost_savings = self.calculate_cost_savings(len(hostnames_to_remove), total_hosts)
+        
+        return {
+            'removed_hosts': hostnames_to_remove,
+            'removed_count': len(hostnames_to_remove),
+            'remaining_count': remaining_hosts,
+            'workload_percentage': workload_percentage,
+            'current_avg_cpu': current_avg,
+            'estimated_new_avg': estimated_new_avg,
+            'additional_load_per_host': additional_load_per_host,
+            'risk_level': risk_level,
+            'risk_factors': risk_factors,
+            'removed_hosts_analysis': removed_hosts_analysis,
+            'remaining_hosts_analysis': remaining_hosts_analysis,
+            'cost_savings': cost_savings,
+            'infrastructure_reduction': (len(hostnames_to_remove) / total_hosts) * 100
+        }
+
+    def calculate_cost_savings(self, removed_hosts, total_hosts):
+        """Calculate estimated cost savings from consolidation"""
+        reduction_percentage = (removed_hosts / total_hosts) * 100
+        
+        # Rough estimates - you can customize these based on your environment
+        annual_host_cost = 15000  # Average annual cost per host (hardware, power, licensing)
+        power_savings_per_host = 2000  # Annual power/cooling savings per host
+        
+        hardware_savings = removed_hosts * annual_host_cost
+        power_savings = removed_hosts * power_savings_per_host
+        license_savings = removed_hosts * 3000  # Rough vSphere license cost
+        
+        total_annual_savings = hardware_savings + power_savings + license_savings
+        
+        return {
+            'hardware_savings': hardware_savings,
+            'power_savings': power_savings,
+            'license_savings': license_savings,
+            'total_annual_savings': total_annual_savings,
+            'reduction_percentage': reduction_percentage
+        }
+
+    def display_comprehensive_impact_results(self, analysis):
+        """Display comprehensive consolidation impact analysis"""
+        
+        risk_colors = {
+            'LOW': '🟢',
+            'MEDIUM': '🟡', 
+            'HIGH': '🔴'
+        }
+        
+        risk_indicator = risk_colors.get(analysis['risk_level'], '⚪')
+        
+        report = f"""🔍 COMPREHENSIVE CONSOLIDATION IMPACT ANALYSIS
+    ═══════════════════════════════════════════════════════════════════════════════════
+
+    Analysis Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+    Selected Hosts: {analysis['removed_count']} of {analysis['removed_count'] + analysis['remaining_count']} total
+
+    📊 INFRASTRUCTURE IMPACT:
+    ═══════════════════════════════════════════════════════════════════════════════════
+
+    Infrastructure Reduction: {analysis['infrastructure_reduction']:.1f}%
+    Hosts to Remove: {analysis['removed_count']}
+    Remaining Hosts: {analysis['remaining_count']}
+    Workload to Redistribute: {analysis['workload_percentage']:.1f}%
+
+    ⚡ PERFORMANCE IMPACT:
+    ═══════════════════════════════════════════════════════════════════════════════════
+
+    Current Average CPU Ready: {analysis['current_avg_cpu']:.2f}%
+    Estimated Post-Consolidation: {analysis['estimated_new_avg']:.2f}%
+    Additional Load per Host: +{analysis['additional_load_per_host']:.1f}%
+
+    🎯 RISK ASSESSMENT: {risk_indicator} {analysis['risk_level']} RISK
+    ═══════════════════════════════════════════════════════════════════════════════════
+    """
+        
+        if analysis['risk_factors']:
+            report += "\n⚠️ Risk Factors:\n"
+            for factor in analysis['risk_factors']:
+                report += f"   • {factor}\n"
+        else:
+            report += "\n✅ No significant risk factors identified\n"
+        
+        report += f"""
+    🗑️ HOSTS SELECTED FOR REMOVAL:
+    ═══════════════════════════════════════════════════════════════════════════════════
+    """
+        
+        for host in analysis['removed_hosts_analysis']:
+            status = "✅ Good candidate" if host['avg_cpu'] < 5.0 else "⚠️ Review carefully"
+            report += f"""
+    {host['hostname']} - {status}
+    • Average CPU Ready: {host['avg_cpu']:.2f}%
+    • Peak CPU Ready: {host['max_cpu']:.2f}%
+    • Workload Share: {host['workload_share']:.1f}%
+    • Health Score: {host['health_score']:.0f}/100
+    """
+        
+        report += f"""
+    🖥️ REMAINING HOSTS (Post-Consolidation):
+    ═══════════════════════════════════════════════════════════════════════════════════
+    """
+        
+        for host in analysis['remaining_hosts_analysis']:
+            if host['estimated_new_avg'] > 15:
+                capacity_status = "🔴 HIGH LOAD"
+            elif host['estimated_new_avg'] > 8:
+                capacity_status = "🟡 MODERATE LOAD"
+            else:
+                capacity_status = "🟢 ACCEPTABLE"
+            
+            report += f"""
+    {host['hostname']} - {capacity_status}
+    • Current CPU Ready: {host['current_avg_cpu']:.2f}%
+    • Estimated New Load: {host['estimated_new_avg']:.2f}%
+    • Capacity Utilization: {host['capacity_utilization']:.0f}%
+    """
+        
+        cost_savings = analysis['cost_savings']
+        report += f"""
+    💰 ESTIMATED COST SAVINGS (Annual):
+    ═══════════════════════════════════════════════════════════════════════════════════
+
+    Hardware/Depreciation: ${cost_savings['hardware_savings']:,.0f}
+    Power & Cooling: ${cost_savings['power_savings']:,.0f}
+    Software Licensing: ${cost_savings['license_savings']:,.0f}
+    ─────────────────────────────────────────────
+    TOTAL ANNUAL SAVINGS: ${cost_savings['total_annual_savings']:,.0f}
+
+    3-Year Projected Savings: ${cost_savings['total_annual_savings'] * 3:,.0f}
+    ROI: {cost_savings['reduction_percentage']:.0f}% infrastructure reduction
+
+    📋 IMPLEMENTATION RECOMMENDATIONS:
+    ═══════════════════════════════════════════════════════════════════════════════════
+    """
+        
+        if analysis['risk_level'] == 'LOW':
+            report += """
+    ✅ LOW RISK - Proceed with confidence:
+    • Good consolidation candidates selected
+    • Minimal performance impact expected
+    • Standard implementation process recommended
+    
+    🚀 Next Steps:
+    1. Schedule maintenance window
+    2. Migrate workloads during off-peak hours
+    3. Monitor performance for 48 hours post-migration
+    4. Update DRS/HA settings
+    """
+        
+        elif analysis['risk_level'] == 'MEDIUM':
+            report += """
+    🟡 MEDIUM RISK - Proceed with caution:
+    • Some performance impact expected
+    • Enhanced monitoring recommended
+    • Consider phased implementation
+    
+    ⚠️ Recommended Precautions:
+    1. Test in non-production environment first
+    2. Implement during lowest usage period
+    3. Have immediate rollback plan ready
+    4. Monitor closely for 1 week post-consolidation
+    5. Consider temporary performance threshold adjustments
+    """
+        
+        else:  # HIGH RISK
+            report += """
+    🔴 HIGH RISK - Review selection carefully:
+    • Significant performance impact likely
+    • High chance of resource contention
+    • Consider reducing scope
+    
+    ⛔ Strong Recommendations:
+    1. Remove fewer hosts from selection
+    2. Focus on lowest-utilization hosts only
+    3. Extensive testing in lab environment
+    4. Staged implementation over multiple maintenance windows
+    5. 24/7 monitoring for 2+ weeks
+    6. Ensure adequate emergency resources available
+    """
+        
+        report += f"""
+    
+    📊 MONITORING CHECKLIST:
+    ═══════════════════════════════════════════════════════════════════════════════════
+
+    Before Consolidation:
+    □ Document current performance baselines
+    □ Verify backup and recovery procedures
+    □ Test workload migration procedures
+    □ Prepare monitoring dashboards
+    □ Brief on-call team on changes
+
+    During Implementation:
+    □ Monitor CPU Ready metrics in real-time
+    □ Watch for memory/storage bottlenecks
+    □ Verify application performance
+    □ Check cluster health status
+    □ Document any issues encountered
+
+    After Consolidation:
+    □ Monitor for {7 if analysis['risk_level'] == 'LOW' else 14} days minimum
+    □ Compare performance to baselines
+    □ Adjust DRS aggressiveness if needed
+    □ Update capacity planning models
+    □ Document lessons learned
+
+    ═══════════════════════════════════════════════════════════════════════════════════
+
+    Analysis complete! Review recommendations above before proceeding with consolidation.
+    """
+        
+        self.impact_text.delete(1.0, tk.END)
+        self.impact_text.insert(1.0, report)
+       
     def create_advanced_tab(self):
         """Create advanced analysis tab using full available space"""
         tab_frame = tk.Frame(self.notebook, bg=self.colors['bg_primary'])
@@ -1259,6 +2677,24 @@ class ModernCPUAnalyzer:
         comparison_btn = tk.Button(button_grid, text="🎯 Host Comparison", 
                                 command=self.show_host_comparison, **btn_style)
         comparison_btn.grid(row=1, column=0, padx=(0, 5), pady=0, sticky="ew")
+        
+        # Export button with accent color
+        export_btn = tk.Button(button_grid, text="📋 Export Report", 
+                            command=self.export_analysis_report,
+                            bg=self.colors['accent_blue'], fg='white',
+                            font=('Segoe UI', 10, 'bold'),
+                            relief='flat', borderwidth=0,
+                            padx=20, pady=10, cursor='hand2')
+        export_btn.grid(row=1, column=1, padx=(5, 0), pady=0, sticky="ew")
+
+        # PDF EXPORT BUTTON (NEW)
+        pdf_export_btn = tk.Button(button_grid, text="📄 Export PDF Report", 
+                                command=self.export_comprehensive_pdf_report,
+                                bg=self.colors['success'], fg='white',
+                                font=('Segoe UI', 10, 'bold'),
+                                relief='flat', borderwidth=0,
+                                padx=20, pady=10, cursor='hand2')
+        pdf_export_btn.grid(row=2, column=0, columnspan=2, padx=0, pady=(8, 0), sticky="ew")
         
         # Export button with accent color
         export_btn = tk.Button(button_grid, text="📋 Export Report", 
@@ -1524,7 +2960,20 @@ class ModernCPUAnalyzer:
             print(f"  Records: {num_records}")
             print(f"  Average interval: {avg_interval_seconds:.1f} seconds")
             
-            # Method 1: Filename-based detection (most reliable)
+            # Method 1: ENHANCED - Daily data detection (PRIORITY)
+            # Check for daily data patterns (most common for yearly exports)
+            days = time_span.days
+            hours_between_records = avg_interval_seconds / 3600
+            
+            # Strong indicators of daily data
+            if (360 <= num_records <= 370 and days >= 360) or \
+            (23 <= hours_between_records <= 25):  # ~24 hours between records
+                detected_interval = "Last Year"
+                print(f"  DAILY DATA DETECTED: {num_records} records over {days} days")
+                print(f"  Hours between records: {hours_between_records:.1f}")
+                return detected_interval
+            
+            # Method 2: Filename-based detection (high priority)
             filename_lower = filename.lower()
             if any(keyword in filename_lower for keyword in ['real', 'realtime', 'real-time', 'live']):
                 detected_interval = "Real-Time"
@@ -1542,8 +2991,7 @@ class ModernCPUAnalyzer:
                 detected_interval = "Last Year"
                 print(f"  Filename suggests: Last Year")
             else:
-                # Method 2: Time span analysis
-                days = time_span.days
+                # Method 3: Time span analysis (fallback)
                 hours = time_span.total_seconds() / 3600
                 
                 if hours <= 1.5:
@@ -1562,7 +3010,7 @@ class ModernCPUAnalyzer:
                     detected_interval = "Last Year"
                     print(f"  Time span suggests: Last Year ({days:.1f} days)")
             
-            # Method 3: Validation against expected intervals
+            # Method 4: Validation against expected intervals with ENHANCED daily check
             expected_intervals = {
                 "Real-Time": 20,      # 20 seconds
                 "Last Day": 300,      # 5 minutes
@@ -1578,8 +3026,15 @@ class ModernCPUAnalyzer:
             print(f"  Expected interval for {detected_interval}: {expected_seconds}s")
             print(f"  Actual vs Expected ratio: {interval_ratio:.2f}")
             
+            # ENHANCED: Special validation for daily data
+            # If we have ~daily intervals but detected something else, correct it
+            if 23 <= hours_between_records <= 25 and detected_interval != "Last Year":
+                print(f"  CORRECTION: Daily intervals detected ({hours_between_records:.1f}h), overriding to Last Year")
+                detected_interval = "Last Year"
+                interval_ratio = avg_interval_seconds / 86400
+            
             # If ratio is way off, try to find a better match
-            if interval_ratio > 3 or interval_ratio < 0.3:
+            elif interval_ratio > 3 or interval_ratio < 0.3:
                 print(f"  Interval mismatch detected, searching for better match...")
                 
                 best_match = "Last Day"
@@ -1596,38 +3051,72 @@ class ModernCPUAnalyzer:
                     detected_interval = best_match
                     print(f"  Auto-corrected to: {detected_interval} (ratio: {best_ratio:.2f})")
             
-            # Method 4: Special case handling for your specific files
-            # Based on the CSV info you provided
-            special_cases = {
-                # Real-Time: 180 records, ~1 hour, 20-second intervals
-                (180, "realtime"): "Real-Time",
-                (180, "real"): "Real-Time",
+            # Method 5: Enhanced special case handling
+            special_cases = [
+                # Daily data patterns (365 days, ~24h intervals)
+                ((360, 370), (23, 25), "Last Year"),  # 360-370 records, 23-25h intervals
                 
-                # Last Day: 288 records, ~24 hours, 5-minute intervals  
-                (288, "day"): "Last Day",
-                (288, "daily"): "Last Day",
+                # Real-Time: ~180 records, ~1 hour, 20-second intervals
+                ((170, 190), (15, 25), "Real-Time"),  # 170-190 records, 15-25 second intervals
                 
-                # Last Week: 336 records, ~7 days, 30-minute intervals
-                (336, "week"): "Last Week",
-                (336, "weekly"): "Last Week",
+                # Last Day: ~288 records, ~24 hours, 5-minute intervals  
+                ((280, 300), (280, 320), "Last Day"),  # 280-300 records, 280-320 second intervals
                 
-                # Last Month: 360 records, ~30 days, 2-hour intervals
-                (360, "month"): "Last Month",
-                (360, "monthly"): "Last Month",
+                # Last Week: ~336 records, ~7 days, 30-minute intervals
+                ((330, 350), (1700, 1900), "Last Week"),  # 330-350 records, 1700-1900 second intervals
+                
+                # Last Month: ~360 records, ~30 days, 2-hour intervals
+                ((350, 370), (7000, 7400), "Last Month"),  # 350-370 records, 7000-7400 second intervals
+            ]
+            
+            for (min_records, max_records), (min_interval, max_interval), suggested_interval in special_cases:
+                if (min_records <= num_records <= max_records and 
+                    min_interval <= avg_interval_seconds <= max_interval):
+                    
+                    print(f"  Special case match: {suggested_interval}")
+                    print(f"    Records: {num_records} (expected {min_records}-{max_records})")
+                    print(f"    Interval: {avg_interval_seconds:.0f}s (expected {min_interval}-{max_interval}s)")
+                    
+                    detected_interval = suggested_interval
+                    break
+            
+            # Method 6: Filename keyword + record count validation
+            filename_record_patterns = {
+                # Check for specific patterns that indicate yearly data
+                ("year", (360, 370)): "Last Year",
+                ("yearly", (360, 370)): "Last Year", 
+                ("annual", (360, 370)): "Last Year",
+                ("365", (360, 370)): "Last Year",
+                
+                # Real-time patterns
+                ("real", (100, 200)): "Real-Time",
+                ("live", (100, 200)): "Real-Time",
+                
+                # Daily patterns
+                ("day", (200, 400)): "Last Day",
+                ("daily", (200, 400)): "Last Day",
             }
             
-            for (record_count, keyword), suggested_interval in special_cases.items():
-                if (abs(num_records - record_count) <= 20 and 
-                    keyword in filename_lower):
-                    detected_interval = suggested_interval
-                    print(f"  Special case match: {detected_interval} (records: {num_records}, keyword: {keyword})")
+            for (keyword, (min_rec, max_rec)), suggested in filename_record_patterns.items():
+                if (keyword in filename_lower and min_rec <= num_records <= max_rec):
+                    print(f"  Filename+Records pattern match: {suggested}")
+                    print(f"    Keyword: '{keyword}', Records: {num_records}")
+                    detected_interval = suggested
                     break
             
             print(f"  FINAL DETECTION: {detected_interval}")
+            
+            # Final validation log
+            final_expected = expected_intervals[detected_interval]
+            final_ratio = avg_interval_seconds / final_expected
+            print(f"  Final validation: {avg_interval_seconds:.0f}s actual vs {final_expected}s expected (ratio: {final_ratio:.2f})")
+            
             return detected_interval
             
         except Exception as e:
             print(f"DEBUG: Error in interval detection: {e}")
+            import traceback
+            traceback.print_exc()
             return "Last Day"  # Safe fallback
 
     def enhanced_import_files(self):
@@ -2615,9 +4104,8 @@ class ModernCPUAnalyzer:
                         print(f"DEBUG: Sample statistics - Min: {min_sample:.2f}, Max: {max_sample:.2f}, Avg: {avg_sample:.2f}")
                         
                         # Data format detection and conversion
-                        if avg_sample > 10000:
-                            # Data is likely in microseconds or very high milliseconds
-                            subset['CPU_Ready_Percent'] = (subset['CPU_Ready_Sum'] / (interval_seconds * 10000)) * 100
+                        if avg_sample > 100000:  # Higher threshold
+                            subset['CPU_Ready_Percent'] = (subset['CPU_Ready_Sum'] / (interval_seconds * 1000)) * 100
                             print(f"DEBUG: Data appears to be in microseconds, applying conversion factor")
                             conversion_applied = "microseconds"
                         elif avg_sample > 1000:
@@ -3173,18 +4661,7 @@ class ModernCPUAnalyzer:
         self.ax.clear()
         self.canvas.draw()
     
-    # Host Management Methods
-    def update_host_list(self):
-        """Update host selection listbox"""
-        if self.processed_data is None:
-            return
-        
-        self.hosts_listbox.delete(0, tk.END)
-        
-        hostnames = sorted(self.processed_data['Hostname'].unique())
-        for hostname in hostnames:
-            self.hosts_listbox.insert(tk.END, hostname)
-    
+    # Host Management Methods   
     def select_all_hosts(self):
         """Select all hosts"""
         self.hosts_listbox.select_set(0, tk.END)
@@ -3562,8 +5039,12 @@ Thresholds: Warning {warning_level}% | Critical {critical_level}%
             bp = ax2.boxplot(all_values, tick_labels=labels, patch_artist=True)
         except TypeError:
             # Fallback for older matplotlib versions
-            bp = ax2.boxplot(all_values, labels=labels, patch_artist=True)
-        
+            try:
+                bp = ax2.boxplot(all_values, tick_labels=labels, patch_artist=True)
+            except TypeError:
+                # Fallback for older matplotlib versions
+                bp = ax2.boxplot(all_values, labels=labels, patch_artist=True)
+
         # Color the boxes
         for patch, color in zip(bp['boxes'], colors):
             patch.set_facecolor(color)
