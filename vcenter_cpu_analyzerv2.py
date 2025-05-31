@@ -61,7 +61,591 @@ class ModernCPUAnalyzer:
             "Last Year": 86400
         }
         
+        self.auto_analyze = tk.BooleanVar(value=True)  # Default: auto-analyze ON
+        self.auto_switch_tabs = tk.BooleanVar(value=True)  # Default: auto-switch ON
+        
+        # Add workflow state tracking
+        self.workflow_state = {
+            'data_imported': False,
+            'analysis_complete': False,
+            'last_action': None
+        }
+        
+        # NOW setup the UI (this will access the auto-flow variables)
         self.setup_modern_ui()
+
+    def create_auto_flow_controls(self, parent):
+        """Add auto-flow controls to Data Source tab"""
+        # Add this to your Data Source tab creation
+        
+        auto_flow_frame = tk.LabelFrame(parent, text="  ⚙️ Workflow Settings  ",
+                                       bg=self.colors['bg_primary'],
+                                       fg=self.colors['accent_blue'],
+                                       font=('Segoe UI', 10, 'bold'),
+                                       borderwidth=1,
+                                       relief='solid')
+        auto_flow_frame.pack(fill=tk.X, padx=10, pady=5)
+        
+        controls_content = tk.Frame(auto_flow_frame, bg=self.colors['bg_primary'])
+        controls_content.pack(fill=tk.X, padx=10, pady=8)
+        
+        # Auto-analyze checkbox
+        auto_analyze_cb = tk.Checkbutton(controls_content,
+                                        text="🔄 Auto-analyze after import",
+                                        variable=self.auto_analyze,
+                                        bg=self.colors['bg_primary'],
+                                        fg=self.colors['text_primary'],
+                                        selectcolor=self.colors['input_bg'],
+                                        activebackground=self.colors['bg_primary'],
+                                        activeforeground=self.colors['text_primary'],
+                                        font=('Segoe UI', 9))
+        auto_analyze_cb.pack(side=tk.LEFT, padx=(0, 20))
+        
+        # Auto-switch tabs checkbox  
+        auto_switch_cb = tk.Checkbutton(controls_content,
+                                       text="📊 Auto-switch to results",
+                                       variable=self.auto_switch_tabs,
+                                       bg=self.colors['bg_primary'],
+                                       fg=self.colors['text_primary'],
+                                       selectcolor=self.colors['input_bg'],
+                                       activebackground=self.colors['bg_primary'],
+                                       activeforeground=self.colors['text_primary'],
+                                       font=('Segoe UI', 9))
+        auto_switch_cb.pack(side=tk.LEFT)
+
+    def fetch_vcenter_data(self):
+        """Fetch CPU Ready data from vCenter for all hosts with styled progress dialog and auto-flow"""
+        if not self.vcenter_connection:
+            messagebox.showerror("No Connection", "Please connect to vCenter first")
+            return
+        
+        # Get date range based on selected vCenter period
+        start_date, end_date = self.get_vcenter_date_range()
+        selected_period = self.vcenter_period_var.get()
+        perf_interval = self.vcenter_intervals[selected_period]
+        
+        # Create styled progress dialog
+        progress_window = self.create_styled_popup_window("Fetching vCenter Data", 400, 150)
+        progress_window.resizable(False, False)
+        
+        # Progress content with dark theme
+        progress_content = tk.Frame(progress_window, bg=self.colors['bg_primary'])
+        progress_content.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
+        
+        # Title
+        title_label = tk.Label(progress_content, 
+                            text="🔄 Fetching CPU Ready data from vCenter...",
+                            bg=self.colors['bg_primary'],
+                            fg=self.colors['text_primary'],
+                            font=('Segoe UI', 11, 'bold'))
+        title_label.pack(pady=(0, 15))
+        
+        # Info frame
+        info_frame = tk.Frame(progress_content, bg=self.colors['bg_primary'])
+        info_frame.pack(pady=(0, 10))
+        
+        tk.Label(info_frame, text=f"Period: {selected_period}",
+                bg=self.colors['bg_primary'],
+                fg=self.colors['text_secondary'],
+                font=('Segoe UI', 9)).pack()
+        tk.Label(info_frame, text=f"Range: {start_date} to {end_date}",
+                bg=self.colors['bg_primary'],
+                fg=self.colors['text_secondary'],
+                font=('Segoe UI', 9)).pack()
+        tk.Label(info_frame, text=f"Interval: {perf_interval} seconds",
+                bg=self.colors['bg_primary'],
+                fg=self.colors['text_secondary'],
+                font=('Segoe UI', 9)).pack()
+        
+        # Progress bar
+        progress_bar = ttk.Progressbar(progress_content, mode='indeterminate', length=300)
+        progress_bar.pack(pady=15)
+        progress_bar.start()
+        
+        # Track success for auto-flow logic
+        fetch_successful = False
+        
+        # Run fetch in separate thread
+        def fetch_thread():
+            nonlocal fetch_successful
+            try:
+                content = self.vcenter_connection.RetrieveContent()
+                hosts = self.get_all_hosts(content)
+                
+                if not hosts:
+                    messagebox.showwarning("No Hosts", "No ESXi hosts found in vCenter")
+                    return
+                
+                cpu_ready_data = self.fetch_cpu_ready_metrics(content, hosts, start_date, end_date, perf_interval)
+                
+                if cpu_ready_data:
+                    df = pd.DataFrame(cpu_ready_data)
+                    df['source_file'] = f'vCenter_{selected_period}_{start_date.strftime("%Y%m%d")}_{end_date.strftime("%Y%m%d")}'
+                    
+                    self.data_frames.append(df)
+                    self.update_file_status()
+                    self.update_data_preview()
+                    
+                    # Auto-set the interval
+                    self.interval_var.set(selected_period)
+                    self.current_interval = selected_period
+                    
+                    # Mark as successful for auto-flow
+                    fetch_successful = True
+                    
+                    # AUTO-FLOW INTEGRATION - Mark workflow state
+                    self.workflow_state['data_imported'] = True
+                    self.workflow_state['last_action'] = 'vcenter_fetch'
+                    
+                    # Show traditional success message first
+                    messagebox.showinfo("Success", 
+                                    f"✅ Successfully fetched vCenter data!\n\n"
+                                    f"📊 Period: {selected_period}\n"
+                                    f"🖥️  Hosts: {len(hosts)}\n"
+                                    f"📅 Date Range: {start_date} to {end_date}\n"
+                                    f"📈 Total Records: {len(cpu_ready_data)}")
+                    
+                    # AUTO-FLOW LOGIC - Execute after success message
+                    if self.auto_analyze.get():
+                        self.show_smart_notification("vCenter data fetched! Auto-analyzing...", 2000)
+                        self.root.after(1500, self.auto_calculate_and_switch)
+                    else:
+                        self.show_action_prompt("vCenter data ready! Analyze now?", 
+                                            "🔍 Analyze", 
+                                            self.manual_calculate_and_switch)
+                else:
+                    messagebox.showwarning("No Data", f"No CPU Ready data found for {selected_period}")
+                    
+            except Exception as e:
+                messagebox.showerror("Fetch Error", f"Error fetching data from vCenter:\n{str(e)}")
+            finally:
+                progress_window.destroy()
+        
+        threading.Thread(target=fetch_thread, daemon=True).start()
+ 
+    def manual_calculate_and_switch(self):
+        """Manual trigger for calculate and switch"""
+        self.auto_calculate_and_switch()
+
+    def switch_to_analysis_with_highlight(self):
+        """Switch to Analysis tab with visual feedback"""
+        # Switch to Analysis tab (tab index 1)
+        self.notebook.select(1)
+        
+        # Show success notification
+        self.show_smart_notification("✅ Analysis complete! Showing results...", 2000)
+        
+        # Highlight the results briefly
+        self.root.after(500, self.highlight_results_table)
+
+    def highlight_analysis_tab(self):
+        """Add visual indicator to Analysis tab"""
+        # Add a temporary visual indicator (could be color change, icon, etc.)
+        current_text = self.notebook.tab(1, "text")
+        self.notebook.tab(1, text="📊 Analysis ⚡")  # Add lightning bolt
+        
+        # Reset after 5 seconds
+        self.root.after(5000, lambda: self.notebook.tab(1, text=current_text))
+
+    def highlight_results_table(self):
+        """Briefly highlight the results table"""
+        # Flash the results tree background
+        original_style = self.results_tree.cget('style') if hasattr(self.results_tree, 'cget') else None
+        
+        # Create a highlight effect (you can customize this)
+        def flash_table(count=0):
+            if count < 3:  # Flash 3 times
+                bg_color = self.colors['accent_blue'] if count % 2 == 0 else self.colors['bg_secondary']
+                # Apply highlighting logic here
+                self.root.after(300, lambda: flash_table(count + 1))
+        
+        flash_table()
+
+    def show_smart_notification(self, message, duration=3000):
+        """Show non-blocking notification"""
+        # Create a temporary notification that doesn't block workflow
+        notification_frame = tk.Frame(self.root, 
+                                    bg=self.colors['accent_blue'], 
+                                    relief='solid', 
+                                    borderwidth=1)
+        
+        notification_label = tk.Label(notification_frame,
+                                    text=f"ℹ️ {message}",
+                                    bg=self.colors['accent_blue'],
+                                    fg='white',
+                                    font=('Segoe UI', 10, 'bold'),
+                                    padx=15, pady=8)
+        notification_label.pack()
+        
+        # Position at top center
+        notification_frame.place(relx=0.5, y=10, anchor='n')
+        
+        # Auto-hide after duration
+        self.root.after(duration, notification_frame.destroy)
+
+    def show_action_prompt(self, message, button_text, callback):
+        """Show action prompt with single button"""
+        prompt_frame = tk.Frame(self.root,
+                              bg=self.colors['bg_tertiary'],
+                              relief='solid',
+                              borderwidth=1)
+        
+        content_frame = tk.Frame(prompt_frame, bg=self.colors['bg_tertiary'])
+        content_frame.pack(padx=15, pady=10)
+        
+        message_label = tk.Label(content_frame,
+                               text=message,
+                               bg=self.colors['bg_tertiary'],
+                               fg=self.colors['text_primary'],
+                               font=('Segoe UI', 10))
+        message_label.pack(pady=(0, 10))
+        
+        button_frame = tk.Frame(content_frame, bg=self.colors['bg_tertiary'])
+        button_frame.pack()
+        
+        action_btn = tk.Button(button_frame,
+                             text=button_text,
+                             command=lambda: [callback(), prompt_frame.destroy()],
+                             bg=self.colors['accent_blue'], fg='white',
+                             font=('Segoe UI', 9, 'bold'),
+                             relief='flat', borderwidth=0,
+                             padx=15, pady=5)
+        action_btn.pack(side=tk.LEFT, padx=(0, 10))
+        
+        dismiss_btn = tk.Button(button_frame,
+                              text="Later",
+                              command=prompt_frame.destroy,
+                              bg=self.colors['bg_secondary'], 
+                              fg=self.colors['text_primary'],
+                              font=('Segoe UI', 9),
+                              relief='flat', borderwidth=0,
+                              padx=15, pady=5)
+        dismiss_btn.pack(side=tk.LEFT)
+        
+        # Position and auto-hide
+        prompt_frame.place(relx=0.5, rely=0.1, anchor='n')
+        self.root.after(10000, prompt_frame.destroy)  # Auto-hide after 10s
+
+    def setup_modern_ui(self):
+        """Create modern UI with CONSISTENT geometry management"""
+        # Main container - ensure it expands properly
+        main_container = tk.Frame(self.root, bg=self.colors['bg_primary'])
+        main_container.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        
+        # Header (fixed height) - USE PACK CONSISTENTLY
+        self.create_header(main_container)
+        
+        # Create notebook (expandable) - USE PACK CONSISTENTLY  
+        self.create_notebook(main_container)
+        
+        # Status bar (fixed height) - USE PACK CONSISTENTLY
+        self.create_status_bar(main_container)
+
+    def create_header(self, parent):
+        """Create modern header section - FIXED widget types"""
+        header_frame = tk.Frame(parent, bg=self.colors['bg_primary'])
+        header_frame.pack(fill=tk.X, pady=(0, 20))
+        
+        # Title container
+        title_container = tk.Frame(header_frame, bg=self.colors['bg_primary'])
+        title_container.pack(fill=tk.X)
+        
+        # Left side - title
+        title_frame = tk.Frame(title_container, bg=self.colors['bg_primary'])
+        title_frame.pack(side=tk.LEFT)
+        
+        title_label = tk.Label(title_frame, text="🖥️ vCenter CPU Ready Analyzer",
+                            bg=self.colors['bg_primary'],
+                            fg=self.colors['text_primary'],
+                            font=('Segoe UI', 14, 'bold'))
+        title_label.pack(anchor=tk.W)
+        
+        subtitle_label = tk.Label(title_frame, text="Analyse CPU Ready metrics and optimize host consolidation",
+                                bg=self.colors['bg_primary'],
+                                fg=self.colors['text_secondary'],
+                                font=('Segoe UI', 11))
+        subtitle_label.pack(anchor=tk.W, pady=(2, 0))
+        
+        # Right side - connection status - USE tk.Label (not ttk.Label)
+        status_frame = tk.Frame(title_container, bg=self.colors['bg_primary'])
+        status_frame.pack(side=tk.RIGHT)
+        
+        self.connection_status = tk.Label(status_frame, text="⚫ Disconnected",
+                                        bg=self.colors['bg_primary'],
+                                        fg=self.colors['error'],
+                                        font=('Segoe UI', 10))
+        self.connection_status.pack(side=tk.RIGHT)
+
+    def create_notebook(self, parent):
+        """Create tabbed interface with pack geometry"""
+        self.notebook = ttk.Notebook(parent)
+        self.notebook.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        
+        # Data Source Tab
+        self.create_data_source_tab()
+        
+        # Analysis Tab
+        self.create_analysis_tab()
+        
+        # Visualisation Tab
+        self.create_visualization_tab()
+        
+        # Host Management Tab
+        self.create_host_management_tab()
+        
+        # Advanced Tab
+        self.create_advanced_tab()
+        
+        # About Tab
+        self.create_about_tab()
+
+    def create_status_bar(self, parent):
+        """Create modern status bar - FIXED for pack"""
+        status_frame = tk.Frame(parent, bg=self.colors['bg_primary'])
+        status_frame.pack(fill=tk.X, pady=(15, 0))
+        
+        # Left side - status label
+        status_left = tk.Frame(status_frame, bg=self.colors['bg_primary'])
+        status_left.pack(side=tk.LEFT)
+        
+        self.status_label = tk.Label(status_left, text="Ready",
+                                    bg=self.colors['bg_primary'],
+                                    fg=self.colors['text_secondary'],
+                                    font=('Segoe UI', 10))
+        self.status_label.pack(side=tk.LEFT)
+        
+        # Right side - progress bar (hidden by default)
+        status_right = tk.Frame(status_frame, bg=self.colors['bg_primary'])
+        status_right.pack(side=tk.RIGHT)
+        
+        self.progress_var = tk.DoubleVar()
+        self.progress_bar = ttk.Progressbar(status_right, variable=self.progress_var,
+                                        mode='determinate', length=200)
+        
+        # Store reference for workflow indicators
+        self.status_frame = status_frame
+        self.add_workflow_status_bar()
+
+    def create_data_source_tab(self):
+        """Create data source tab with CONSISTENT pack management"""
+        tab_frame = tk.Frame(self.notebook, bg=self.colors['bg_primary'])
+        self.notebook.add(tab_frame, text="📁 Data Source")
+        
+        # File Import Section
+        file_section = tk.LabelFrame(tab_frame, text="  📂 File Import  ",
+                                    bg=self.colors['bg_primary'],
+                                    fg=self.colors['accent_blue'],
+                                    font=('Segoe UI', 10, 'bold'),
+                                    borderwidth=1,
+                                    relief='solid')
+        file_section.pack(fill=tk.X, padx=10, pady=(10, 5))
+        
+        file_content = tk.Frame(file_section, bg=self.colors['bg_primary'])
+        file_content.pack(fill=tk.X, padx=10, pady=10)
+        
+        # File import controls frame
+        controls_frame = tk.Frame(file_content, bg=self.colors['bg_primary'])
+        controls_frame.pack(fill=tk.X)
+        
+        import_btn = tk.Button(controls_frame, text="📤 Import CSV/Excel Files",
+                            command=self.import_files,
+                            bg=self.colors['accent_blue'], fg='white',
+                            font=('Segoe UI', 9, 'bold'),
+                            relief='flat', borderwidth=0,
+                            padx=15, pady=5)
+        import_btn.pack(side=tk.LEFT)
+        
+        self.file_count_label = tk.Label(controls_frame, text="No files imported",
+                                        bg=self.colors['bg_primary'],
+                                        fg=self.colors['text_primary'],
+                                        font=('Segoe UI', 10))
+        self.file_count_label.pack(side=tk.LEFT, padx=(15, 0), expand=True, anchor=tk.W)
+        
+        clear_btn = tk.Button(controls_frame, text="🗑️ Clear Files",
+                            command=self.clear_files,
+                            bg=self.colors['error'], fg='white',
+                            font=('Segoe UI', 9, 'bold'),
+                            relief='flat', borderwidth=0,
+                            padx=15, pady=5)
+        clear_btn.pack(side=tk.RIGHT)
+        
+        # Auto-flow controls section
+        self.create_auto_flow_controls(tab_frame)
+        
+        # vCenter Integration Section
+        self.create_complete_vcenter_section(tab_frame)
+        
+        # Data Preview Section - COMPLETELY PACK-BASED
+        preview_section = tk.LabelFrame(tab_frame, text="  👁️ Data Preview  ",
+                                    bg=self.colors['bg_primary'],
+                                    fg=self.colors['accent_blue'],
+                                    font=('Segoe UI', 10, 'bold'),
+                                    borderwidth=1,
+                                    relief='solid')
+        preview_section.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+        
+        # Preview content frame
+        preview_content = tk.Frame(preview_section, bg=self.colors['bg_primary'])
+        preview_content.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        
+        # Create treeview
+        columns = ('Source', 'Hosts', 'Records', 'Date Range')
+        self.preview_tree = ttk.Treeview(preview_content, columns=columns, show='headings', height=6)
+        
+        for col in columns:
+            self.preview_tree.heading(col, text=col)
+            self.preview_tree.column(col, width=150)
+        
+        # Scrollbars - USE PACK ONLY
+        # Horizontal scrollbar at bottom
+        h_scrollbar = ttk.Scrollbar(preview_content, orient=tk.HORIZONTAL, command=self.preview_tree.xview)
+        h_scrollbar.pack(side=tk.BOTTOM, fill=tk.X)
+        
+        # Vertical scrollbar at right
+        v_scrollbar = ttk.Scrollbar(preview_content, orient=tk.VERTICAL, command=self.preview_tree.yview)
+        v_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        # Treeview fills remaining space
+        self.preview_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        
+        # Configure scrollbars
+        self.preview_tree.configure(yscrollcommand=v_scrollbar.set, xscrollcommand=h_scrollbar.set)
+
+    def create_analysis_tab(self):
+        """Create analysis tab with PACK management"""
+        tab_frame = tk.Frame(self.notebook, bg=self.colors['bg_primary'])
+        self.notebook.add(tab_frame, text="📊 Analysis")
+        
+        # Configuration Section
+        config_section = tk.LabelFrame(tab_frame, text="  ⚙️ Analysis Configuration  ",
+                                    bg=self.colors['bg_primary'],
+                                    fg=self.colors['accent_blue'],
+                                    font=('Segoe UI', 10, 'bold'),
+                                    borderwidth=1,
+                                    relief='solid')
+        config_section.pack(fill=tk.X, padx=10, pady=(10, 5))
+        
+        config_content = tk.Frame(config_section, bg=self.colors['bg_primary'])
+        config_content.pack(fill=tk.X, padx=10, pady=10)
+        
+        # Controls frame - USE PACK
+        controls_frame = tk.Frame(config_content, bg=self.colors['bg_primary'])
+        controls_frame.pack(fill=tk.X, pady=(0, 10))
+        
+        # Interval selection
+        tk.Label(controls_frame, text="Update Interval:",
+                bg=self.colors['bg_primary'], fg=self.colors['text_primary'],
+                font=('Segoe UI', 10)).pack(side=tk.LEFT)
+        
+        self.interval_var = tk.StringVar(value="Last Day")
+        interval_combo = ttk.Combobox(controls_frame, textvariable=self.interval_var,
+                                    values=list(self.intervals.keys()), state="readonly", width=15)
+        interval_combo.pack(side=tk.LEFT, padx=(10, 20))
+        interval_combo.bind('<<ComboboxSelected>>', self.on_interval_change)
+        
+        # Calculate button
+        calc_btn = tk.Button(controls_frame, text="🔍 Calculate CPU Ready %",
+                            command=lambda: self.calculate_cpu_ready(auto_triggered=False),
+                            bg=self.colors['accent_blue'], fg='white',
+                            font=('Segoe UI', 9, 'bold'),
+                            relief='flat', borderwidth=0,
+                            padx=15, pady=5)
+        calc_btn.pack(side=tk.LEFT)
+        
+        # Threshold controls frame
+        threshold_frame = tk.Frame(config_content, bg=self.colors['bg_primary'])
+        threshold_frame.pack(fill=tk.X)
+        
+        # Warning threshold
+        tk.Label(threshold_frame, text="Warning Threshold:",
+                bg=self.colors['bg_primary'], fg=self.colors['text_primary'],
+                font=('Segoe UI', 10)).pack(side=tk.LEFT)
+        
+        self.warning_threshold = tk.DoubleVar(value=5.0)
+        warning_spin = tk.Spinbox(threshold_frame, from_=1.0, to=50.0, width=8,
+                                textvariable=self.warning_threshold, increment=1.0,
+                                bg=self.colors['input_bg'], fg=self.colors['text_primary'],
+                                insertbackground=self.colors['text_primary'],
+                                relief='flat', borderwidth=1)
+        warning_spin.pack(side=tk.LEFT, padx=(5, 2))
+        
+        tk.Label(threshold_frame, text="%",
+                bg=self.colors['bg_primary'], fg=self.colors['text_primary']).pack(side=tk.LEFT, padx=(0, 15))
+        
+        # Critical threshold
+        tk.Label(threshold_frame, text="Critical Threshold:",
+                bg=self.colors['bg_primary'], fg=self.colors['text_primary'],
+                font=('Segoe UI', 10)).pack(side=tk.LEFT)
+        
+        self.critical_threshold = tk.DoubleVar(value=15.0)
+        critical_spin = tk.Spinbox(threshold_frame, from_=5.0, to=100.0, width=8,
+                                textvariable=self.critical_threshold, increment=5.0,
+                                bg=self.colors['input_bg'], fg=self.colors['text_primary'],
+                                insertbackground=self.colors['text_primary'],
+                                relief='flat', borderwidth=1)
+        critical_spin.pack(side=tk.LEFT, padx=(5, 2))
+        
+        tk.Label(threshold_frame, text="%",
+                bg=self.colors['bg_primary'], fg=self.colors['text_primary']).pack(side=tk.LEFT)
+        
+        # Results Section
+        results_section = tk.LabelFrame(tab_frame, text="  📈 Analysis Results  ",
+                                    bg=self.colors['bg_primary'],
+                                    fg=self.colors['accent_blue'],
+                                    font=('Segoe UI', 10, 'bold'),
+                                    borderwidth=1,
+                                    relief='solid')
+        results_section.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+        
+        results_content = tk.Frame(results_section, bg=self.colors['bg_primary'])
+        results_content.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        
+        # Results table with pack layout
+        columns = ('Host', 'Avg CPU Ready %', 'Max CPU Ready %', 'Health Score', 'Status', 'Records')
+        self.results_tree = ttk.Treeview(results_content, columns=columns, show='headings')
+        
+        for col in columns:
+            self.results_tree.heading(col, text=col)
+            if col == 'Host':
+                self.results_tree.column(col, width=150)
+            elif 'CPU Ready' in col:
+                self.results_tree.column(col, width=120)
+            else:
+                self.results_tree.column(col, width=100)
+        
+        # Results scrollbar with pack
+        results_scrollbar = ttk.Scrollbar(results_content, orient=tk.VERTICAL, command=self.results_tree.yview)
+        results_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        self.results_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self.results_tree.configure(yscrollcommand=results_scrollbar.set)
+
+    def add_workflow_status_bar(self):
+        """Add workflow progress indicator - FIXED for pack"""
+        workflow_frame = tk.Frame(self.status_frame, bg=self.colors['bg_primary'])
+        workflow_frame.pack(side=tk.RIGHT, padx=(10, 0))
+        
+        # Workflow status indicators
+        self.workflow_indicators = {
+            'import': tk.Label(workflow_frame, text="📁", bg=self.colors['bg_primary']),
+            'analyze': tk.Label(workflow_frame, text="📊", bg=self.colors['bg_primary']),
+            'visualize': tk.Label(workflow_frame, text="📈", bg=self.colors['bg_primary'])
+        }
+        
+        for key, label in self.workflow_indicators.items():
+            label.pack(side=tk.LEFT, padx=2)
+            self.update_workflow_indicator(key, 'pending')
+
+    def update_workflow_indicator(self, step, status):
+        """Update workflow step indicator"""
+        colors = {
+            'pending': self.colors['text_muted'],
+            'active': self.colors['warning'], 
+            'complete': self.colors['success']
+        }
+        
+        if step in self.workflow_indicators:
+            self.workflow_indicators[step].config(fg=colors.get(status, self.colors['text_muted'])) 
         
     def setup_theme(self):
         """Configure modern dark theme with clean, minimal borders"""
@@ -376,155 +960,29 @@ class ModernCPUAnalyzer:
                                 relief='solid')
         return card_frame
 
-    def setup_modern_ui(self):
-        """Create modern UI with proper expansion settings"""
-        # Main container - ensure it expands properly
-        main_container = tk.Frame(self.root, bg=self.colors['bg_primary'])
-        main_container.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S), padx=5, pady=5)
+    def create_styled_popup_window(self, title, width=1200, height=800):
+        """Create a popup window with consistent dark theme styling"""
+        popup = tk.Toplevel(self.root)
+        popup.title(title)
+        popup.geometry(f"{width}x{height}")
+        popup.transient(self.root)
+        popup.configure(bg=self.colors['bg_primary'])
         
-        # Configure main container to expand
-        main_container.columnconfigure(0, weight=1)
-        main_container.rowconfigure(1, weight=1)  # Notebook gets the space
+        # Center the window
+        popup.geometry(f"+{self.root.winfo_rootx() + 50}+{self.root.winfo_rooty() + 50}")
         
-        # Configure root window expansion
-        self.root.columnconfigure(0, weight=1)
-        self.root.rowconfigure(0, weight=1)
-        
-        # Header (fixed height)
-        self.create_header(main_container)
-        
-        # Create notebook (expandable)
-        self.create_notebook(main_container)
-        
-        # Status bar (fixed height)
-        self.create_status_bar(main_container)
-       
-    def create_header(self, parent):
-        """Create modern header section"""
-        header_frame = ttk.Frame(parent)
-        header_frame.grid(row=0, column=0, sticky=(tk.W, tk.E), pady=(0, 20))
-        header_frame.columnconfigure(1, weight=1)
-        
-        # App title and description
-        title_frame = ttk.Frame(header_frame)
-        title_frame.grid(row=0, column=0, sticky=(tk.W))
-        
-        ttk.Label(title_frame, text="🖥️ vCenter CPU Ready Analyzer", 
-                 style='Title.TLabel').grid(row=0, column=0, sticky=tk.W)
-        ttk.Label(title_frame, text="Analyze CPU Ready metrics and optimize host consolidation", 
-                 style='Subtitle.TLabel').grid(row=1, column=0, sticky=tk.W, pady=(2, 0))
-        
-        # Connection status
-        self.status_frame = ttk.Frame(header_frame)
-        self.status_frame.grid(row=0, column=1, sticky=(tk.E))
-        
-        self.connection_status = ttk.Label(self.status_frame, text="⚫ Disconnected", 
-                                         style='Error.TLabel')
-        self.connection_status.grid(row=0, column=0, sticky=tk.E)
-        
-    def create_notebook(self, parent):
-        """Create tabbed interface with proper sizing"""
-        self.notebook = ttk.Notebook(parent)
-        self.notebook.grid(row=1, column=0, sticky=(tk.W, tk.E, tk.N, tk.S), padx=5, pady=5)
-        
-        # Ensure notebook expands properly
-        parent.rowconfigure(1, weight=1)
-        parent.columnconfigure(0, weight=1)
-        
-        # Data Source Tab
-        self.create_data_source_tab()
-        
-        # Analysis Tab
-        self.create_analysis_tab()
-        
-        # Visualization Tab
-        self.create_visualization_tab()
-        
-        # Host Management Tab
-        self.create_host_management_tab()
-        
-        # Advanced Tab
-        self.create_advanced_tab()
-        
-    def create_data_source_tab(self):
-        """Create data source tab with complete vCenter integration"""
-        tab_frame = tk.Frame(self.notebook, bg=self.colors['bg_primary'])
-        self.notebook.add(tab_frame, text="📁 Data Source")
-        
-        # File Import Section
-        file_section = tk.LabelFrame(tab_frame, text="  📂 File Import  ",
-                                    bg=self.colors['bg_primary'],
-                                    fg=self.colors['accent_blue'],
-                                    font=('Segoe UI', 10, 'bold'),
-                                    borderwidth=1,
-                                    relief='solid')
-        file_section.pack(fill=tk.X, padx=10, pady=(10, 5))
-        
-        file_content = tk.Frame(file_section, bg=self.colors['bg_primary'])
-        file_content.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
-        
-        # File import controls
-        import_btn = tk.Button(file_content, text="📤 Import CSV/Excel Files",
-                            command=self.import_files,
-                            bg=self.colors['accent_blue'], fg='white',
-                            font=('Segoe UI', 9, 'bold'),
-                            relief='flat', borderwidth=0,
-                            padx=15, pady=5)
-        import_btn.grid(row=0, column=0, padx=(0, 15))
-        
-        self.file_count_label = tk.Label(file_content, text="No files imported",
-                                        bg=self.colors['bg_primary'], 
-                                        fg=self.colors['text_primary'],
-                                        font=('Segoe UI', 10))
-        self.file_count_label.grid(row=0, column=1, sticky=tk.W)
-        
-        clear_btn = tk.Button(file_content, text="🗑️ Clear Files",
-                            command=self.clear_files,
-                            bg=self.colors['error'], fg='white',
-                            font=('Segoe UI', 9, 'bold'),
-                            relief='flat', borderwidth=0,
-                            padx=15, pady=5)
-        clear_btn.grid(row=0, column=2, padx=(15, 0))
-        
-        # Configure grid weights
-        file_content.columnconfigure(1, weight=1)
-        
-        # vCenter Integration Section
-        self.create_complete_vcenter_section(tab_frame)
-        
-        # Data Preview Section
-        preview_section = tk.LabelFrame(tab_frame, text="  👁️ Data Preview  ",
-                                    bg=self.colors['bg_primary'],
-                                    fg=self.colors['accent_blue'],
-                                    font=('Segoe UI', 10, 'bold'),
-                                    borderwidth=1,
-                                    relief='solid')
-        preview_section.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
-        
-        preview_content = tk.Frame(preview_section, bg=self.colors['bg_primary'])
-        preview_content.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
-        
-        # Preview treeview
-        columns = ('Source', 'Hosts', 'Records', 'Date Range')
-        self.preview_tree = ttk.Treeview(preview_content, columns=columns, show='headings', height=6)
-        
-        for col in columns:
-            self.preview_tree.heading(col, text=col)
-            self.preview_tree.column(col, width=150)
-        
-        # Scrollbars for preview
-        v_scrollbar = ttk.Scrollbar(preview_content, orient=tk.VERTICAL, command=self.preview_tree.yview)
-        h_scrollbar = ttk.Scrollbar(preview_content, orient=tk.HORIZONTAL, command=self.preview_tree.xview)
-        
-        self.preview_tree.configure(yscrollcommand=v_scrollbar.set, xscrollcommand=h_scrollbar.set)
-        
-        self.preview_tree.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
-        v_scrollbar.grid(row=0, column=1, sticky=(tk.N, tk.S))
-        h_scrollbar.grid(row=1, column=0, sticky=(tk.W, tk.E))
-        
-        preview_content.columnconfigure(0, weight=1)
-        preview_content.rowconfigure(0, weight=1)
-      
+        return popup
+    
+    def create_styled_frame(self, parent, text=""):
+        """Create a styled frame with consistent dark theme"""
+        frame = tk.LabelFrame(parent, text=f"  {text}  " if text else "",
+                            bg=self.colors['bg_primary'],
+                            fg=self.colors['accent_blue'],
+                            font=('Segoe UI', 10, 'bold'),
+                            borderwidth=1,
+                            relief='solid')
+        return frame
+                        
     def create_vcenter_section(self, parent):
         """Create vCenter integration section"""
         vcenter_section = self.create_card(parent, "🔗 vCenter Integration")
@@ -619,130 +1077,26 @@ class ModernCPUAnalyzer:
         self.preview_tree.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
         v_scrollbar.grid(row=0, column=1, sticky=(tk.N, tk.S))
         h_scrollbar.grid(row=1, column=0, sticky=(tk.W, tk.E))
-        
-    def create_analysis_tab(self):
-        """Create analysis tab with tk widgets instead of ttk"""
-        tab_frame = tk.Frame(self.notebook, bg=self.colors['bg_primary'])
-        self.notebook.add(tab_frame, text="📊 Analysis")
-        
-        # Configuration Section - use tk.LabelFrame
-        config_section = tk.LabelFrame(tab_frame, text="  ⚙️ Analysis Configuration  ",
-                                    bg=self.colors['bg_primary'],
-                                    fg=self.colors['accent_blue'],
-                                    font=('Segoe UI', 10, 'bold'),
-                                    borderwidth=1,
-                                    relief='solid')
-        config_section.pack(fill=tk.X, padx=10, pady=(10, 5))
-        
-        config_content = tk.Frame(config_section, bg=self.colors['bg_primary'])
-        config_content.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
-        
-        # Controls frame
-        controls_frame = tk.Frame(config_content, bg=self.colors['bg_primary'])
-        controls_frame.pack(fill=tk.X)
-        
-        tk.Label(controls_frame, text="Update Interval:",
-                bg=self.colors['bg_primary'], fg=self.colors['text_primary'],
-                font=('Segoe UI', 10)).grid(row=0, column=0, sticky=tk.W, padx=(0, 10))
-        
-        self.interval_var = tk.StringVar(value="Last Day")
-        interval_combo = ttk.Combobox(controls_frame, textvariable=self.interval_var,
-                                    values=list(self.intervals.keys()), state="readonly", width=15)
-        interval_combo.grid(row=0, column=1, padx=(0, 20))
-        interval_combo.bind('<<ComboboxSelected>>', self.on_interval_change)
-        
-        # Use tk.Button instead of ttk.Button for cleaner look
-        calc_btn = tk.Button(controls_frame, text="🔍 Calculate CPU Ready %",
-                            command=self.calculate_cpu_ready,
-                            bg=self.colors['accent_blue'], fg='white',
-                            font=('Segoe UI', 9, 'bold'),
-                            relief='flat', borderwidth=0,
-                            padx=15, pady=5)
-        calc_btn.grid(row=0, column=2, padx=(20, 0))
-        
-        # Threshold controls with tk widgets
-        threshold_frame = tk.Frame(config_content, bg=self.colors['bg_primary'])
-        threshold_frame.pack(fill=tk.X, pady=(10, 0))
-        
-        tk.Label(threshold_frame, text="Warning Threshold:",
-                bg=self.colors['bg_primary'], fg=self.colors['text_primary'],
-                font=('Segoe UI', 10)).grid(row=0, column=0, sticky=tk.W, padx=(0, 5))
-        
-        self.warning_threshold = tk.DoubleVar(value=5.0)
-        warning_spin = tk.Spinbox(threshold_frame, from_=1.0, to=50.0, width=8,
-                                textvariable=self.warning_threshold, increment=1.0,
-                                bg=self.colors['input_bg'], fg=self.colors['text_primary'],
-                                insertbackground=self.colors['text_primary'],
-                                relief='flat', borderwidth=1)
-        warning_spin.grid(row=0, column=1, padx=(0, 5))
-        
-        tk.Label(threshold_frame, text="%",
-                bg=self.colors['bg_primary'], fg=self.colors['text_primary']).grid(row=0, column=2, padx=(0, 15))
-        
-        tk.Label(threshold_frame, text="Critical Threshold:",
-                bg=self.colors['bg_primary'], fg=self.colors['text_primary'],
-                font=('Segoe UI', 10)).grid(row=0, column=3, sticky=tk.W, padx=(0, 5))
-        
-        self.critical_threshold = tk.DoubleVar(value=15.0)
-        critical_spin = tk.Spinbox(threshold_frame, from_=5.0, to=100.0, width=8,
-                                textvariable=self.critical_threshold, increment=5.0,
-                                bg=self.colors['input_bg'], fg=self.colors['text_primary'],
-                                insertbackground=self.colors['text_primary'],
-                                relief='flat', borderwidth=1)
-        critical_spin.grid(row=0, column=4, padx=(0, 5))
-        
-        tk.Label(threshold_frame, text="%",
-                bg=self.colors['bg_primary'], fg=self.colors['text_primary']).grid(row=0, column=5)
-        
-        # Results Section - clean tk.LabelFrame
-        results_section = tk.LabelFrame(tab_frame, text="  📈 Analysis Results  ",
-                                    bg=self.colors['bg_primary'],
-                                    fg=self.colors['accent_blue'],
-                                    font=('Segoe UI', 10, 'bold'),
-                                    borderwidth=1,
-                                    relief='solid')
-        results_section.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
-        
-        results_content = tk.Frame(results_section, bg=self.colors['bg_primary'])
-        results_content.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
-        
-        # Keep ttk.Treeview but style it better
-        columns = ('Host', 'Avg CPU Ready %', 'Max CPU Ready %', 'Health Score', 'Status', 'Records')
-        self.results_tree = ttk.Treeview(results_content, columns=columns, show='headings')
-        
-        for col in columns:
-            self.results_tree.heading(col, text=col)
-            if col == 'Host':
-                self.results_tree.column(col, width=150)
-            elif 'CPU Ready' in col:
-                self.results_tree.column(col, width=120)
-            else:
-                self.results_tree.column(col, width=100)
-        
-        # Results scrollbar
-        results_scrollbar = ttk.Scrollbar(results_content, orient=tk.VERTICAL, command=self.results_tree.yview)
-        self.results_tree.configure(yscrollcommand=results_scrollbar.set)
-        
-        self.results_tree.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
-        results_scrollbar.grid(row=0, column=1, sticky=(tk.N, tk.S))
-        
-        results_content.columnconfigure(0, weight=1)
-        results_content.rowconfigure(0, weight=1)
-        
+               
     def create_visualization_tab(self):
-        """Create visualization tab"""
-        tab_frame = ttk.Frame(self.notebook)
-        self.notebook.add(tab_frame, text="📊 Visualization")
+        """Create Visualisation tab"""
+        tab_frame = tk.Frame(self.notebook, bg=self.colors['bg_primary'])
+        self.notebook.add(tab_frame, text="📊 Visualisation")
         
         tab_frame.columnconfigure(0, weight=1)
         tab_frame.rowconfigure(0, weight=1)
         
         # Chart container
-        chart_section = self.create_card(tab_frame, "📈 CPU Ready Timeline")
-        chart_section.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
+        chart_section = tk.LabelFrame(tab_frame, text="  📈 CPU Ready Timeline  ",
+                                    bg=self.colors['bg_primary'],
+                                    fg=self.colors['accent_blue'],
+                                    font=('Segoe UI', 10, 'bold'),
+                                    borderwidth=1,
+                                    relief='solid')
+        chart_section.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
         
-        chart_content = ttk.Frame(chart_section)
-        chart_content.pack(fill=tk.BOTH, expand=True, padx=15, pady=15)
+        chart_content = tk.Frame(chart_section, bg=self.colors['bg_primary'])
+        chart_content.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
         chart_content.columnconfigure(0, weight=1)
         chart_content.rowconfigure(0, weight=1)
         
@@ -756,26 +1110,33 @@ class ModernCPUAnalyzer:
         
     def create_host_management_tab(self):
         """Create host management tab"""
-        tab_frame = ttk.Frame(self.notebook)
-        self.notebook.add(tab_frame, text="🖥️ Host Management")
+        tab_frame = tk.Frame(self.notebook, bg=self.colors['bg_primary'])
+        self.notebook.add(tab_frame, text="🖥️ Hosts")
         
         tab_frame.columnconfigure(0, weight=1)
         tab_frame.rowconfigure(1, weight=1)
         
         # Host Selection Section
-        selection_section = self.create_card(tab_frame, "🎯 Host Consolidation Analysis")
-        selection_section.grid(row=0, column=0, sticky=(tk.W, tk.E), pady=(0, 15))
+        selection_section = tk.LabelFrame(tab_frame, text="  🎯 Host Consolidation Analysis  ",
+                                        bg=self.colors['bg_primary'],
+                                        fg=self.colors['accent_blue'],
+                                        font=('Segoe UI', 10, 'bold'),
+                                        borderwidth=1,
+                                        relief='solid')
+        selection_section.pack(fill=tk.X, padx=10, pady=(10, 5))
         
-        selection_content = ttk.Frame(selection_section)
-        selection_content.pack(fill=tk.BOTH, expand=True, padx=15, pady=15)
+        selection_content = tk.Frame(selection_section, bg=self.colors['bg_primary'])
+        selection_content.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
         selection_content.columnconfigure(0, weight=1)
         
         # Instructions
-        ttk.Label(selection_content, text="Select hosts to analyze removal impact:", 
-                 style='Header.TLabel').pack(anchor=tk.W, pady=(0, 10))
+        tk.Label(selection_content, text="Select hosts to Analyse removal impact:",
+                bg=self.colors['bg_primary'],
+                fg=self.colors['accent_blue'],
+                font=('Segoe UI', 11, 'bold')).pack(anchor=tk.W, pady=(0, 10))
         
         # Host list frame
-        list_frame = ttk.Frame(selection_content)
+        list_frame = tk.Frame(selection_content, bg=self.colors['bg_primary'])
         list_frame.pack(fill=tk.BOTH, expand=True)
         list_frame.columnconfigure(0, weight=1)
         
@@ -787,24 +1148,46 @@ class ModernCPUAnalyzer:
         self.hosts_listbox.configure(yscrollcommand=hosts_scrollbar.set)
         hosts_scrollbar.grid(row=0, column=1, sticky=(tk.N, tk.S))
         
-        # Control buttons
-        button_frame = ttk.Frame(list_frame)
+        # Control buttons frame
+        button_frame = tk.Frame(list_frame, bg=self.colors['bg_primary'])
         button_frame.grid(row=0, column=2, padx=(15, 0), sticky=(tk.N))
         
-        ttk.Button(button_frame, text="✓ Select All", 
-                  command=self.select_all_hosts).pack(pady=(0, 5), fill=tk.X)
-        ttk.Button(button_frame, text="✗ Clear All", 
-                  command=self.clear_all_hosts).pack(pady=(0, 15), fill=tk.X)
-        ttk.Button(button_frame, text="🔍 Analyze Impact", 
-                  command=self.analyze_multiple_removal_impact, 
-                  style='Primary.TButton').pack(fill=tk.X)
+        # Control buttons with consistent styling
+        select_all_btn = tk.Button(button_frame, text="✓ Select All",
+                                command=self.select_all_hosts,
+                                bg=self.colors['bg_secondary'], fg=self.colors['text_primary'],
+                                font=('Segoe UI', 9, 'bold'),
+                                relief='flat', borderwidth=0,
+                                padx=10, pady=5)
+        select_all_btn.pack(pady=(0, 5), fill=tk.X)
+        
+        clear_all_btn = tk.Button(button_frame, text="✗ Clear All",
+                                command=self.clear_all_hosts,
+                                bg=self.colors['bg_secondary'], fg=self.colors['text_primary'],
+                                font=('Segoe UI', 9, 'bold'),
+                                relief='flat', borderwidth=0,
+                                padx=10, pady=5)
+        clear_all_btn.pack(pady=(0, 15), fill=tk.X)
+        
+        analyze_btn = tk.Button(button_frame, text="🔍 Analyse Impact",
+                            command=self.analyze_multiple_removal_impact,
+                            bg=self.colors['accent_blue'], fg='white',
+                            font=('Segoe UI', 9, 'bold'),
+                            relief='flat', borderwidth=0,
+                            padx=10, pady=5)
+        analyze_btn.pack(fill=tk.X)
         
         # Results Section
-        results_section = self.create_card(tab_frame, "📊 Impact Analysis Results")
-        results_section.grid(row=1, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
+        results_section = tk.LabelFrame(tab_frame, text="  📊 Impact Analysis Results  ",
+                                    bg=self.colors['bg_primary'],
+                                    fg=self.colors['accent_blue'],
+                                    font=('Segoe UI', 10, 'bold'),
+                                    borderwidth=1,
+                                    relief='solid')
+        results_section.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
         
-        results_content = ttk.Frame(results_section)
-        results_content.pack(fill=tk.BOTH, expand=True, padx=15, pady=15)
+        results_content = tk.Frame(results_section, bg=self.colors['bg_primary'])
+        results_content.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
         results_content.columnconfigure(0, weight=1)
         results_content.rowconfigure(0, weight=1)
         
@@ -1017,25 +1400,7 @@ class ModernCPUAnalyzer:
         
         # Auto-populate health data if available
         self.root.after(100, lambda: self.apply_thresholds() if hasattr(self, 'processed_data') and self.processed_data is not None else None)
-      
-    def create_status_bar(self, parent):
-        """Create modern status bar"""
-        status_frame = ttk.Frame(parent)
-        status_frame.grid(row=2, column=0, sticky=(tk.W, tk.E), pady=(15, 0))
-        status_frame.columnconfigure(1, weight=1)
-        
-        # Status information
-        self.status_label = ttk.Label(status_frame, text="Ready", style='Subtitle.TLabel')
-        self.status_label.grid(row=0, column=0, sticky=tk.W)
-        
-        # Progress bar (hidden by default)
-        self.progress_var = tk.DoubleVar()
-        self.progress_bar = ttk.Progressbar(status_frame, variable=self.progress_var, 
-                                          mode='determinate', length=200)
-        
-        # Add window close handling
-        self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
-        
+           
     def show_progress(self, message="Processing..."):
         """Show progress bar with message"""
         self.status_label.config(text=message)
@@ -1052,59 +1417,57 @@ class ModernCPUAnalyzer:
     
     # Data Import Methods
     def import_files(self):
-        """Import CSV/Excel files with modern progress indication"""
-        file_paths = filedialog.askopenfilenames(
-            title="Select CPU Ready Data Files",
-            filetypes=[
-                ("CSV files", "*.csv"),
-                ("Excel files", "*.xlsx *.xls"),
-                ("All supported", "*.csv *.xlsx *.xls"),
-                ("All files", "*.*")
-            ]
-        )
-        
-        if not file_paths:
-            return
-        
-        self.show_progress(f"Importing {len(file_paths)} files...")
-        successful_imports = 0
-        
+        return self.enhanced_import_files()
+
+    def auto_calculate_and_switch(self):
+        """Auto-calculate CPU Ready and optionally switch tabs"""
         try:
-            for file_path in file_paths:
-                try:
-                    if file_path.lower().endswith('.csv'):
-                        df = pd.read_csv(file_path)
-                    else:
-                        df = pd.read_excel(file_path)
-                    
-                    if not self.validate_dataframe(df):
-                        messagebox.showwarning("Invalid File", 
-                                             f"File {Path(file_path).name} does not have required columns")
-                        continue
-                    
-                    df['source_file'] = Path(file_path).name
-                    self.data_frames.append(df)
-                    successful_imports += 1
-                    
-                except Exception as e:
-                    messagebox.showerror("Import Error", 
-                                       f"Error importing {Path(file_path).name}:\n{str(e)}")
+            # Run the analysis
+            success = self.calculate_cpu_ready(auto_triggered=True)
             
-            if successful_imports > 0:
-                self.update_file_status()
-                self.update_data_preview()
-                messagebox.showinfo("Import Complete", 
-                                  f"Successfully imported {successful_imports} files")
-            
-        finally:
-            self.hide_progress()
+            if success:
+                # Mark analysis complete
+                self.workflow_state['analysis_complete'] = True
+                
+                # Smart tab switching
+                if self.auto_switch_tabs.get():
+                    self.switch_to_analysis_with_highlight()
+                else:
+                    self.show_smart_notification("Analysis complete! Check the Analysis tab.", 3000)
+                    self.highlight_analysis_tab()
+                    
+        except Exception as e:
+            messagebox.showerror("Auto-Analysis Error", f"Error during auto-analysis:\n{str(e)}")
     
     def validate_dataframe(self, df):
+        """Enhanced dataframe validation"""
         try:
+            # Check if dataframe is valid
+            if df is None or df.empty:
+                return False
+            
+            # Look for time columns
             time_cols = [col for col in df.columns if 'time' in col.lower()]
-            ready_cols = [col for col in df.columns if 'ready for' in col.lower()]
-            return bool(time_cols) and bool(ready_cols)
-        except AttributeError:
+            
+            # Look for CPU Ready columns (various possible formats)
+            ready_cols = [col for col in df.columns if any([
+                'ready for' in col.lower(),
+                'cpu ready' in col.lower(),
+                'cpuready' in col.lower()
+            ])]
+            
+            # Must have at least one time column and one ready column
+            has_time = bool(time_cols)
+            has_ready = bool(ready_cols)
+            
+            print(f"DEBUG: Validation - Time columns: {time_cols}")
+            print(f"DEBUG: Validation - Ready columns: {ready_cols}")
+            print(f"DEBUG: Validation result: Time={has_time}, Ready={has_ready}")
+            
+            return has_time and has_ready
+            
+        except Exception as e:
+            print(f"DEBUG: Validation error: {e}")
             return False
     
     def clear_files(self):
@@ -1122,9 +1485,273 @@ class ModernCPUAnalyzer:
             self.file_count_label.config(text=f"{len(self.data_frames)} files imported")
         else:
             self.file_count_label.config(text="No files imported")
-    
+
+    def detect_interval_from_data(self, df, filename=""):
+        """
+        Automatically detect the correct interval based on data analysis
+        Returns the detected interval key that matches self.intervals
+        """
+        try:
+            # Find time column
+            time_col = None
+            for col in df.columns:
+                if any(keyword in col.lower() for keyword in ['time', 'timestamp', 'date']):
+                    time_col = col
+                    break
+            
+            if not time_col:
+                print(f"DEBUG: No time column found for interval detection")
+                return "Last Day"  # Default fallback
+            
+            # Convert to datetime and sort
+            df_copy = df.copy()
+            df_copy[time_col] = pd.to_datetime(df_copy[time_col])
+            df_copy = df_copy.sort_values(time_col)
+            
+            # Calculate time span and interval
+            time_span = df_copy[time_col].max() - df_copy[time_col].min()
+            num_records = len(df_copy)
+            
+            # Calculate average interval between samples
+            if num_records > 1:
+                total_seconds = time_span.total_seconds()
+                avg_interval_seconds = total_seconds / (num_records - 1)
+            else:
+                avg_interval_seconds = 300  # Default 5 minutes
+            
+            print(f"DEBUG: Interval detection for {filename}")
+            print(f"  Time span: {time_span}")
+            print(f"  Records: {num_records}")
+            print(f"  Average interval: {avg_interval_seconds:.1f} seconds")
+            
+            # Method 1: Filename-based detection (most reliable)
+            filename_lower = filename.lower()
+            if any(keyword in filename_lower for keyword in ['real', 'realtime', 'real-time', 'live']):
+                detected_interval = "Real-Time"
+                print(f"  Filename suggests: Real-Time")
+            elif any(keyword in filename_lower for keyword in ['day', 'daily', '24h', '1day']):
+                detected_interval = "Last Day"
+                print(f"  Filename suggests: Last Day")
+            elif any(keyword in filename_lower for keyword in ['week', 'weekly', '7day', '1week']):
+                detected_interval = "Last Week"
+                print(f"  Filename suggests: Last Week")
+            elif any(keyword in filename_lower for keyword in ['month', 'monthly', '30day', '1month']):
+                detected_interval = "Last Month"
+                print(f"  Filename suggests: Last Month")
+            elif any(keyword in filename_lower for keyword in ['year', 'yearly', 'annual', '365day', '1year']):
+                detected_interval = "Last Year"
+                print(f"  Filename suggests: Last Year")
+            else:
+                # Method 2: Time span analysis
+                days = time_span.days
+                hours = time_span.total_seconds() / 3600
+                
+                if hours <= 1.5:
+                    detected_interval = "Real-Time"
+                    print(f"  Time span suggests: Real-Time ({hours:.1f} hours)")
+                elif days <= 1.5:
+                    detected_interval = "Last Day"
+                    print(f"  Time span suggests: Last Day ({days:.1f} days)")
+                elif days <= 8:
+                    detected_interval = "Last Week"
+                    print(f"  Time span suggests: Last Week ({days:.1f} days)")
+                elif days <= 35:
+                    detected_interval = "Last Month"
+                    print(f"  Time span suggests: Last Month ({days:.1f} days)")
+                else:
+                    detected_interval = "Last Year"
+                    print(f"  Time span suggests: Last Year ({days:.1f} days)")
+            
+            # Method 3: Validation against expected intervals
+            expected_intervals = {
+                "Real-Time": 20,      # 20 seconds
+                "Last Day": 300,      # 5 minutes
+                "Last Week": 1800,    # 30 minutes
+                "Last Month": 7200,   # 2 hours
+                "Last Year": 86400    # 1 day
+            }
+            
+            # Check if detected interval makes sense with the data
+            expected_seconds = expected_intervals.get(detected_interval, 300)
+            interval_ratio = avg_interval_seconds / expected_seconds
+            
+            print(f"  Expected interval for {detected_interval}: {expected_seconds}s")
+            print(f"  Actual vs Expected ratio: {interval_ratio:.2f}")
+            
+            # If ratio is way off, try to find a better match
+            if interval_ratio > 3 or interval_ratio < 0.3:
+                print(f"  Interval mismatch detected, searching for better match...")
+                
+                best_match = "Last Day"
+                best_ratio = float('inf')
+                
+                for interval_name, expected_sec in expected_intervals.items():
+                    ratio = abs(1 - (avg_interval_seconds / expected_sec))
+                    print(f"    {interval_name}: ratio {ratio:.2f}")
+                    if ratio < best_ratio:
+                        best_ratio = ratio
+                        best_match = interval_name
+                
+                if best_ratio < 2:  # Accept if within reasonable range
+                    detected_interval = best_match
+                    print(f"  Auto-corrected to: {detected_interval} (ratio: {best_ratio:.2f})")
+            
+            # Method 4: Special case handling for your specific files
+            # Based on the CSV info you provided
+            special_cases = {
+                # Real-Time: 180 records, ~1 hour, 20-second intervals
+                (180, "realtime"): "Real-Time",
+                (180, "real"): "Real-Time",
+                
+                # Last Day: 288 records, ~24 hours, 5-minute intervals  
+                (288, "day"): "Last Day",
+                (288, "daily"): "Last Day",
+                
+                # Last Week: 336 records, ~7 days, 30-minute intervals
+                (336, "week"): "Last Week",
+                (336, "weekly"): "Last Week",
+                
+                # Last Month: 360 records, ~30 days, 2-hour intervals
+                (360, "month"): "Last Month",
+                (360, "monthly"): "Last Month",
+            }
+            
+            for (record_count, keyword), suggested_interval in special_cases.items():
+                if (abs(num_records - record_count) <= 20 and 
+                    keyword in filename_lower):
+                    detected_interval = suggested_interval
+                    print(f"  Special case match: {detected_interval} (records: {num_records}, keyword: {keyword})")
+                    break
+            
+            print(f"  FINAL DETECTION: {detected_interval}")
+            return detected_interval
+            
+        except Exception as e:
+            print(f"DEBUG: Error in interval detection: {e}")
+            return "Last Day"  # Safe fallback
+
+    def enhanced_import_files(self):
+        """Enhanced file import with auto-interval detection and auto-flow"""
+        # File selection dialog
+        file_paths = filedialog.askopenfilenames(
+            title="Select CPU Ready Data Files",
+            filetypes=[
+                ("CSV files", "*.csv"),
+                ("Excel files", "*.xlsx *.xls"),
+                ("All supported", "*.csv *.xlsx *.xls"),
+                ("All files", "*.*")
+            ]
+        )
+        
+        if not file_paths:
+            return
+        
+        self.show_progress(f"Importing {len(file_paths)} files...")
+        successful_imports = 0
+        failed_imports = []
+        detected_intervals = []
+        
+        try:
+            for file_path in file_paths:
+                try:
+                    filename = Path(file_path).name
+                    print(f"DEBUG: Processing file: {filename}")
+                    
+                    # Determine file type and read accordingly
+                    if file_path.lower().endswith('.csv'):
+                        df = pd.read_csv(file_path)
+                    else:
+                        df = pd.read_excel(file_path)
+                    
+                    # Validate the dataframe structure
+                    if not self.validate_dataframe(df):
+                        failed_imports.append(f"{filename} - Invalid columns")
+                        continue
+                    
+                    # AUTO-DETECT INTERVAL based on data characteristics
+                    detected_interval = self.detect_interval_from_data(df, filename)
+                    detected_intervals.append((filename, detected_interval))
+                    
+                    # Add metadata to dataframe
+                    df['source_file'] = filename
+                    df['detected_interval'] = detected_interval
+                    
+                    self.data_frames.append(df)
+                    successful_imports += 1
+                    
+                    print(f"DEBUG: Successfully imported {filename} with interval: {detected_interval}")
+                    
+                except Exception as e:
+                    error_msg = f"{Path(file_path).name} - {str(e)}"
+                    failed_imports.append(error_msg)
+                    print(f"DEBUG: Import error: {error_msg}")
+                    continue
+            
+            # Update UI components
+            if successful_imports > 0:
+                self.update_file_status()
+                self.update_data_preview()
+                
+                # AUTO-SET INTERVAL based on most common detection or first file
+                if detected_intervals:
+                    # Use the most commonly detected interval, or first file's interval
+                    interval_counts = {}
+                    for filename, interval in detected_intervals:
+                        interval_counts[interval] = interval_counts.get(interval, 0) + 1
+                    
+                    # Choose most frequent interval
+                    most_common_interval = max(interval_counts, key=interval_counts.get)
+                    
+                    print(f"DEBUG: Detected intervals: {detected_intervals}")
+                    print(f"DEBUG: Auto-setting interval to: {most_common_interval}")
+                    
+                    # Update the interval dropdown
+                    self.interval_var.set(most_common_interval)
+                    self.current_interval = most_common_interval
+                
+                # Mark workflow state
+                self.workflow_state['data_imported'] = True
+                self.workflow_state['last_action'] = 'import'
+                
+                # Build result message with interval detection info
+                result_msg = f"Successfully imported {successful_imports} files"
+                if failed_imports:
+                    result_msg += f"\n{len(failed_imports)} files failed to import"
+                
+                # Add interval detection summary
+                if detected_intervals:
+                    unique_intervals = set(interval for _, interval in detected_intervals)
+                    if len(unique_intervals) == 1:
+                        result_msg += f"\nAuto-detected interval: {most_common_interval}"
+                    else:
+                        result_msg += f"\nDetected intervals: {', '.join(unique_intervals)}"
+                        result_msg += f"\nUsing: {most_common_interval}"
+                
+                # AUTO-FLOW LOGIC
+                if hasattr(self, 'auto_analyze') and self.auto_analyze.get():
+                    self.show_smart_notification(f"{result_msg}. Auto-analyzing...", 4000)
+                    # Small delay for user feedback, then auto-analyze
+                    self.root.after(2000, self.auto_calculate_and_switch)
+                else:
+                    # Show traditional success message with interval info
+                    messagebox.showinfo("Import Complete", result_msg)
+                    # Show manual prompt
+                    if hasattr(self, 'show_action_prompt'):
+                        self.show_action_prompt("Data imported with auto-detected intervals! Ready to analyze?", 
+                                            "🔍 Analyze Now", 
+                                            self.manual_calculate_and_switch)
+            else:
+                # No successful imports
+                error_details = "\n".join(failed_imports) if failed_imports else "Unknown error"
+                messagebox.showerror("Import Failed", f"No files were imported successfully.\n\nErrors:\n{error_details}")
+                    
+        except Exception as e:
+            messagebox.showerror("Import Error", f"Unexpected error during import process:\n{str(e)}")
+        finally:
+            self.hide_progress()
+
     def update_data_preview(self):
-        """Update data preview table"""
+        """Update data preview table with interval detection info"""
         # Clear existing items
         for item in self.preview_tree.get_children():
             self.preview_tree.delete(item)
@@ -1136,6 +1763,7 @@ class ModernCPUAnalyzer:
             try:
                 # Extract info from dataframe
                 source = df['source_file'].iloc[0] if 'source_file' in df.columns else "Unknown"
+                detected_interval = df['detected_interval'].iloc[0] if 'detected_interval' in df.columns else "Not detected"
                 
                 # Count hosts
                 ready_cols = [col for col in df.columns if 'ready for' in col.lower()]
@@ -1149,24 +1777,203 @@ class ModernCPUAnalyzer:
                 if time_cols:
                     try:
                         time_data = pd.to_datetime(df[time_cols[0]])
-                        date_range = f"{time_data.min().strftime('%Y-%m-%d')} to {time_data.max().strftime('%Y-%m-%d')}"
+                        start_date = time_data.min().strftime('%Y-%m-%d %H:%M')
+                        end_date = time_data.max().strftime('%Y-%m-%d %H:%M')
+                        date_range = f"{start_date} to {end_date}"
                     except:
-                        date_range = "Unknown"
+                        date_range = "Invalid dates"
                 else:
                     date_range = "No time data"
                 
+                # Enhanced display with interval info
+                display_source = f"{source} [{detected_interval}]"
+                
                 self.preview_tree.insert('', 'end', values=(
-                    source, f"{host_count} hosts", f"{record_count:,} records", date_range
+                    display_source, 
+                    f"{host_count} hosts", 
+                    f"{record_count:,} records", 
+                    date_range
                 ))
                 
             except Exception as e:
                 self.preview_tree.insert('', 'end', values=(
                     "Error", str(e), "", ""
                 ))
-    
-    # vCenter Integration Methods
+
+    # Add this method to support interval-specific CPU Ready calculations
+    def get_interval_for_data(self, df):
+        """Get the detected interval for a specific dataframe"""
+        if 'detected_interval' in df.columns:
+            return df['detected_interval'].iloc[0]
+        return self.current_interval  # Fallback to current selection
+       
+    def create_complete_vcenter_section(self, parent):
+        """Create complete vCenter integration section with improved formatting"""
+        if not VCENTER_AVAILABLE:
+            # Show unavailable message
+            vcenter_section = tk.LabelFrame(parent, text="  ⚠️ vCenter Integration  ",
+                                        bg=self.colors['bg_primary'],
+                                        fg=self.colors['warning'],
+                                        font=('Segoe UI', 10, 'bold'),
+                                        borderwidth=1,
+                                        relief='solid')
+            vcenter_section.pack(fill=tk.X, padx=10, pady=5)
+            
+            warning_frame = tk.Frame(vcenter_section, bg=self.colors['bg_primary'])
+            warning_frame.pack(fill=tk.X, padx=10, pady=10)
+            
+            tk.Label(warning_frame, 
+                    text="⚠️ vCenter integration requires additional packages:",
+                    bg=self.colors['bg_primary'], 
+                    fg=self.colors['warning'],
+                    font=('Segoe UI', 10, 'bold')).pack(anchor=tk.W)
+            
+            tk.Label(warning_frame,
+                    text="pip install pyvmomi requests",
+                    bg=self.colors['bg_primary'],
+                    fg=self.colors['text_secondary'],
+                    font=('Consolas', 9)).pack(anchor=tk.W, pady=(5, 0))
+            return
+
+        # vCenter Available - Create full integration
+        vcenter_section = tk.LabelFrame(parent, text="  🔗 vCenter Integration  ",
+                                    bg=self.colors['bg_primary'],
+                                    fg=self.colors['accent_blue'],
+                                    font=('Segoe UI', 10, 'bold'),
+                                    borderwidth=1,
+                                    relief='solid')
+        vcenter_section.pack(fill=tk.X, padx=10, pady=5)
+        
+        vcenter_content = tk.Frame(vcenter_section, bg=self.colors['bg_primary'])
+        vcenter_content.pack(fill=tk.X, padx=10, pady=10)
+        
+        # Connection fields frame - all in one row
+        conn_frame = tk.Frame(vcenter_content, bg=self.colors['bg_primary'])
+        conn_frame.pack(fill=tk.X, pady=(0, 10))
+        
+        # Configure grid weights for proper resizing
+        conn_frame.columnconfigure(1, weight=2)  # vCenter Server gets more space
+        conn_frame.columnconfigure(3, weight=1)  # Username gets normal space
+        conn_frame.columnconfigure(5, weight=1)  # Password gets normal space
+        
+        # vCenter Server
+        tk.Label(conn_frame, text="vCenter Server:", 
+                bg=self.colors['bg_primary'], fg=self.colors['text_primary'],
+                font=('Segoe UI', 10)).grid(row=0, column=0, sticky=tk.W, padx=(0, 8))
+        
+        self.vcenter_host = tk.Entry(conn_frame, width=30,
+                                    bg=self.colors['input_bg'], 
+                                    fg=self.colors['text_primary'],
+                                    insertbackground=self.colors['text_primary'],
+                                    relief='flat', borderwidth=1,
+                                    font=('Segoe UI', 9))
+        self.vcenter_host.grid(row=0, column=1, sticky=(tk.W, tk.E), padx=(0, 15))
+        
+        # Username
+        tk.Label(conn_frame, text="Username:",
+                bg=self.colors['bg_primary'], fg=self.colors['text_primary'],
+                font=('Segoe UI', 10)).grid(row=0, column=2, sticky=tk.W, padx=(0, 8))
+        
+        self.vcenter_user = tk.Entry(conn_frame, width=25,
+                                    bg=self.colors['input_bg'],
+                                    fg=self.colors['text_primary'],
+                                    insertbackground=self.colors['text_primary'],
+                                    relief='flat', borderwidth=1,
+                                    font=('Segoe UI', 9))
+        self.vcenter_user.grid(row=0, column=3, sticky=(tk.W, tk.E), padx=(0, 15))
+        
+        # Password
+        tk.Label(conn_frame, text="Password:",
+                bg=self.colors['bg_primary'], fg=self.colors['text_primary'],
+                font=('Segoe UI', 10)).grid(row=0, column=4, sticky=tk.W, padx=(0, 8))
+        
+        self.vcenter_pass = tk.Entry(conn_frame, show="*", width=20,
+                                    bg=self.colors['input_bg'],
+                                    fg=self.colors['text_primary'],
+                                    insertbackground=self.colors['text_primary'],
+                                    relief='flat', borderwidth=1,
+                                    font=('Segoe UI', 9))
+        self.vcenter_pass.grid(row=0, column=5, sticky=(tk.W, tk.E), padx=(0, 15))
+        
+        # Connect button
+        self.connect_btn = tk.Button(conn_frame, text="🔌 Connect",
+                                    command=self.connect_vcenter,
+                                    bg=self.colors['accent_blue'], fg='white',
+                                    font=('Segoe UI', 9, 'bold'),
+                                    relief='flat', borderwidth=0,
+                                    padx=15, pady=6)
+        self.connect_btn.grid(row=0, column=6, padx=(0, 15))
+        
+        # Status label
+        self.vcenter_status = tk.Label(conn_frame, text="⚫ Disconnected",
+                                    bg=self.colors['bg_primary'],
+                                    fg=self.colors['error'],
+                                    font=('Segoe UI', 10))
+        self.vcenter_status.grid(row=0, column=7, sticky=tk.W)
+        
+        # Data fetch controls frame - second row
+        fetch_frame = tk.Frame(vcenter_content, bg=self.colors['bg_primary'])
+        fetch_frame.pack(fill=tk.X, pady=(5, 0))
+        
+        # Configure grid weights
+        fetch_frame.columnconfigure(1, weight=1)
+        
+        tk.Label(fetch_frame, text="Time Period:",
+                bg=self.colors['bg_primary'], fg=self.colors['text_primary'],
+                font=('Segoe UI', 10)).grid(row=0, column=0, sticky=tk.W, padx=(0, 8))
+        
+        self.vcenter_period_var = tk.StringVar(value="Last Day")
+        period_values = list(self.vcenter_intervals.keys())
+        
+        # Create a styled dropdown using tk.OptionMenu
+        self.period_dropdown = tk.OptionMenu(fetch_frame, self.vcenter_period_var, *period_values)
+        self.period_dropdown.config(bg=self.colors['input_bg'],
+                                fg=self.colors['text_primary'],
+                                activebackground=self.colors['bg_accent'],
+                                activeforeground=self.colors['text_primary'],
+                                relief='flat', borderwidth=1,
+                                font=('Segoe UI', 9),
+                                width=12)
+        
+        # Style the dropdown menu
+        dropdown_menu = self.period_dropdown['menu']
+        dropdown_menu.config(bg=self.colors['bg_secondary'],
+                            fg=self.colors['text_primary'],
+                            activebackground=self.colors['accent_blue'],
+                            activeforeground='white',
+                            relief='flat',
+                            borderwidth=1)
+        
+        self.period_dropdown.grid(row=0, column=1, sticky=tk.W, padx=(0, 20))
+        
+        # Fetch button  
+        self.fetch_btn = tk.Button(fetch_frame, text="📊 Fetch Data",
+                                command=self.fetch_vcenter_data,
+                                bg=self.colors['bg_secondary'], fg=self.colors['text_primary'],
+                                font=('Segoe UI', 9, 'bold'),
+                                relief='flat', borderwidth=0,
+                                padx=15, pady=6,
+                                state='disabled')  # Disabled until connected
+        self.fetch_btn.grid(row=0, column=2, padx=(0, 15))
+        
+        # Date range display label
+        self.date_range_label = tk.Label(fetch_frame, text="",
+                                        bg=self.colors['bg_primary'],
+                                        fg=self.colors['text_secondary'],
+                                        font=('Segoe UI', 9, 'italic'))
+        self.date_range_label.grid(row=0, column=3, sticky=tk.W)
+        
+        # Update date range display initially
+        self.update_date_range_display()
+        
+        # Bind the period dropdown change event
+        self.vcenter_period_var.trace('w', lambda *args: self.update_date_range_display())
+
     def update_date_range_display(self, event=None):
         """Update date range label based on selected period"""
+        if not hasattr(self, 'date_range_label'):
+            return
+            
         period = self.vcenter_period_var.get()
         now = datetime.now()
         
@@ -1240,10 +2047,13 @@ class ModernCPUAnalyzer:
         threading.Thread(target=connect_thread, daemon=True).start()
 
     def on_vcenter_connected(self, vcenter_host):
-        """Handle successful vCenter connection"""
+        """Handle successful vCenter connection - FIXED widget usage"""
         self.vcenter_status.config(text="🟢 Connected", fg=self.colors['success'])
+        
+        # FIXED: Use tk.Label config instead of ttk style
         self.connection_status.config(text="🟢 vCenter Connected", 
-                                    style='Success.TLabel')
+                                    fg=self.colors['success'])
+        
         self.fetch_btn.config(state='normal')
         self.connect_btn.config(text="🔌 Disconnect", 
                             command=self.disconnect_vcenter,
@@ -1251,153 +2061,31 @@ class ModernCPUAnalyzer:
         self.hide_progress()
         messagebox.showinfo("Success", f"Connected to vCenter: {vcenter_host}")
 
-    def create_complete_vcenter_section(self, parent):
-        """Create complete vCenter integration section"""
-        if not VCENTER_AVAILABLE:
-            # Show unavailable message
-            vcenter_section = tk.LabelFrame(parent, text="  ⚠️ vCenter Integration  ",
-                                        bg=self.colors['bg_primary'],
-                                        fg=self.colors['warning'],
-                                        font=('Segoe UI', 10, 'bold'),
-                                        borderwidth=1,
-                                        relief='solid')
-            vcenter_section.pack(fill=tk.X, padx=10, pady=5)
-            
-            warning_frame = tk.Frame(vcenter_section, bg=self.colors['bg_primary'])
-            warning_frame.pack(fill=tk.X, padx=10, pady=10)
-            
-            tk.Label(warning_frame, 
-                    text="⚠️ vCenter integration requires additional packages:",
-                    bg=self.colors['bg_primary'], 
-                    fg=self.colors['warning'],
-                    font=('Segoe UI', 10, 'bold')).pack(anchor=tk.W)
-            
-            tk.Label(warning_frame,
-                    text="pip install pyvmomi requests",
-                    bg=self.colors['bg_primary'],
-                    fg=self.colors['text_secondary'],
-                    font=('Consolas', 9)).pack(anchor=tk.W, pady=(5, 0))
-            return
-
-        # vCenter Available - Create full integration
-        vcenter_section = tk.LabelFrame(parent, text="  🔗 vCenter Integration  ",
-                                    bg=self.colors['bg_primary'],
-                                    fg=self.colors['accent_blue'],
-                                    font=('Segoe UI', 10, 'bold'),
-                                    borderwidth=1,
-                                    relief='solid')
-        vcenter_section.pack(fill=tk.X, padx=10, pady=5)
-        
-        vcenter_content = tk.Frame(vcenter_section, bg=self.colors['bg_primary'])
-        vcenter_content.pack(fill=tk.X, padx=10, pady=10)
-        
-        # Connection fields frame
-        conn_frame = tk.Frame(vcenter_content, bg=self.colors['bg_primary'])
-        conn_frame.pack(fill=tk.X, pady=(0, 10))
-        
-        # Row 1: Server and Username
-        row1_frame = tk.Frame(conn_frame, bg=self.colors['bg_primary'])
-        row1_frame.pack(fill=tk.X, pady=(0, 5))
-        
-        tk.Label(row1_frame, text="vCenter Server:", 
-                bg=self.colors['bg_primary'], fg=self.colors['text_primary'],
-                font=('Segoe UI', 10)).grid(row=0, column=0, sticky=tk.W, padx=(0, 5))
-        
-        self.vcenter_host = tk.Entry(row1_frame, width=25,
-                                    bg=self.colors['input_bg'], 
-                                    fg=self.colors['text_primary'],
-                                    insertbackground=self.colors['text_primary'],
-                                    relief='flat', borderwidth=1)
-        self.vcenter_host.grid(row=0, column=1, padx=(0, 20), sticky=tk.W)
-        
-        tk.Label(row1_frame, text="Username:",
-                bg=self.colors['bg_primary'], fg=self.colors['text_primary'],
-                font=('Segoe UI', 10)).grid(row=0, column=2, sticky=tk.W, padx=(0, 5))
-        
-        self.vcenter_user = tk.Entry(row1_frame, width=20,
-                                    bg=self.colors['input_bg'],
-                                    fg=self.colors['text_primary'],
-                                    insertbackground=self.colors['text_primary'],
-                                    relief='flat', borderwidth=1)
-        self.vcenter_user.grid(row=0, column=3, sticky=tk.W)
-        
-        # Row 2: Password and Connect button
-        row2_frame = tk.Frame(conn_frame, bg=self.colors['bg_primary'])
-        row2_frame.pack(fill=tk.X)
-        
-        tk.Label(row2_frame, text="Password:",
-                bg=self.colors['bg_primary'], fg=self.colors['text_primary'],
-                font=('Segoe UI', 10)).grid(row=0, column=0, sticky=tk.W, padx=(0, 5))
-        
-        self.vcenter_pass = tk.Entry(row2_frame, show="*", width=25,
-                                    bg=self.colors['input_bg'],
-                                    fg=self.colors['text_primary'],
-                                    insertbackground=self.colors['text_primary'],
-                                    relief='flat', borderwidth=1)
-        self.vcenter_pass.grid(row=0, column=1, padx=(0, 20), sticky=tk.W)
-        
-        # Connect button
-        self.connect_btn = tk.Button(row2_frame, text="🔌 Connect",
-                                    command=self.connect_vcenter,
-                                    bg=self.colors['accent_blue'], fg='white',
-                                    font=('Segoe UI', 9, 'bold'),
-                                    relief='flat', borderwidth=0,
-                                    padx=15, pady=5)
-        self.connect_btn.grid(row=0, column=2, padx=(0, 10))
-        
-        # Status label
-        self.vcenter_status = tk.Label(row2_frame, text="⚫ Disconnected",
-                                    bg=self.colors['bg_primary'],
-                                    fg=self.colors['error'],
-                                    font=('Segoe UI', 10))
-        self.vcenter_status.grid(row=0, column=3, sticky=tk.W)
-        
-        # Data fetch controls frame
-        fetch_frame = tk.Frame(vcenter_content, bg=self.colors['bg_primary'])
-        fetch_frame.pack(fill=tk.X, pady=(10, 0))
-        
-        tk.Label(fetch_frame, text="Time Period:",
-                bg=self.colors['bg_primary'], fg=self.colors['text_primary'],
-                font=('Segoe UI', 10)).grid(row=0, column=0, sticky=tk.W, padx=(0, 5))
-        
-        self.vcenter_period_var = tk.StringVar(value="Last Day")
-        period_values = list(self.vcenter_intervals.keys())
-        
-        # Create a custom combobox-like widget using tk
-        self.period_dropdown = tk.OptionMenu(fetch_frame, self.vcenter_period_var, *period_values)
-        self.period_dropdown.config(bg=self.colors['input_bg'],
-                                fg=self.colors['text_primary'],
-                                activebackground=self.colors['bg_accent'],
-                                activeforeground=self.colors['text_primary'],
-                                relief='flat', borderwidth=1)
-        self.period_dropdown.grid(row=0, column=1, padx=(0, 20))
-        
-        # Fetch button  
-        self.fetch_btn = tk.Button(fetch_frame, text="📊 Fetch Data",
-                                command=self.fetch_vcenter_data,
-                                bg=self.colors['bg_secondary'], fg=self.colors['text_primary'],
-                                font=('Segoe UI', 9, 'bold'),
-                                relief='flat', borderwidth=0,
-                                padx=15, pady=5,
-                                state='disabled')  # Disabled until connected
-        self.fetch_btn.grid(row=0, column=2)
-   
     def on_vcenter_connect_failed(self, error_msg):
-        """Handle failed vCenter connection"""
+        """Handle failed vCenter connection - FIXED widget usage"""
         self.vcenter_status.config(text="🔴 Failed", fg=self.colors['error'])
+        
+        # FIXED: Use tk.Label config instead of ttk style
+        self.connection_status.config(text="🔴 Connection Failed", 
+                                    fg=self.colors['error'])
+        
         self.connect_btn.config(text="🔌 Connect", state='normal')
         self.hide_progress()
         messagebox.showerror("Connection Error", error_msg)
 
     def disconnect_vcenter(self):
-        """Disconnect from vCenter"""
+        """Disconnect from vCenter - FIXED widget usage"""
         try:
             if self.vcenter_connection:
                 Disconnect(self.vcenter_connection)
                 self.vcenter_connection = None
             
             self.vcenter_status.config(text="⚫ Disconnected", fg=self.colors['error'])
-            self.connection_status.config(text="⚫ Disconnected", style='Error.TLabel')
+            
+            # FIXED: Use tk.Label config instead of ttk style
+            self.connection_status.config(text="⚫ Disconnected", 
+                                        fg=self.colors['error'])
+            
             self.fetch_btn.config(state='disabled')
             self.connect_btn.config(text="🔌 Connect", command=self.connect_vcenter)
             
@@ -1405,85 +2093,7 @@ class ModernCPUAnalyzer:
             
         except Exception as e:
             messagebox.showerror("Disconnect Error", f"Error disconnecting: {str(e)}")
-    
-    def fetch_vcenter_data(self):
-        """Fetch CPU Ready data from vCenter for all hosts"""
-        if not self.vcenter_connection:
-            messagebox.showerror("No Connection", "Please connect to vCenter first")
-            return
-        
-        # Get date range based on selected vCenter period
-        start_date, end_date = self.get_vcenter_date_range()
-        selected_period = self.vcenter_period_var.get()
-        perf_interval = self.vcenter_intervals[selected_period]
-        
-        # Create progress dialog
-        progress_window = tk.Toplevel(self.root)
-        progress_window.title("Fetching vCenter Data")
-        progress_window.geometry("400x150")
-        progress_window.transient(self.root)
-        progress_window.grab_set()
-        
-        # Center the progress window
-        progress_window.geometry("+%d+%d" % (
-            self.root.winfo_rootx() + 50,
-            self.root.winfo_rooty() + 50
-        ))
-        
-        ttk.Label(progress_window, text="🔄 Fetching CPU Ready data from vCenter...", 
-                 font=('Segoe UI', 11, 'bold')).pack(pady=15)
-        
-        info_frame = ttk.Frame(progress_window)
-        info_frame.pack(pady=10)
-        
-        ttk.Label(info_frame, text=f"Period: {selected_period}").pack()
-        ttk.Label(info_frame, text=f"Range: {start_date} to {end_date}").pack()
-        ttk.Label(info_frame, text=f"Interval: {perf_interval} seconds").pack()
-        
-        progress_bar = ttk.Progressbar(progress_window, mode='indeterminate', length=300)
-        progress_bar.pack(pady=15)
-        progress_bar.start()
-        
-        # Run fetch in separate thread
-        def fetch_thread():
-            try:
-                content = self.vcenter_connection.RetrieveContent()
-                hosts = self.get_all_hosts(content)
-                
-                if not hosts:
-                    messagebox.showwarning("No Hosts", "No ESXi hosts found in vCenter")
-                    return
-                
-                cpu_ready_data = self.fetch_cpu_ready_metrics(content, hosts, start_date, end_date, perf_interval)
-                
-                if cpu_ready_data:
-                    df = pd.DataFrame(cpu_ready_data)
-                    df['source_file'] = f'vCenter_{selected_period}_{start_date.strftime("%Y%m%d")}_{end_date.strftime("%Y%m%d")}'
-                    
-                    self.data_frames.append(df)
-                    self.update_file_status()
-                    self.update_data_preview()
-                    
-                    # Auto-set the interval
-                    self.interval_var.set(selected_period)
-                    self.current_interval = selected_period
-                    
-                    messagebox.showinfo("Success", 
-                                      f"✅ Successfully fetched vCenter data!\n\n"
-                                      f"📊 Period: {selected_period}\n"
-                                      f"🖥️  Hosts: {len(hosts)}\n"
-                                      f"📅 Date Range: {start_date} to {end_date}\n"
-                                      f"📈 Total Records: {len(cpu_ready_data)}")
-                else:
-                    messagebox.showwarning("No Data", f"No CPU Ready data found for {selected_period}")
-                    
-            except Exception as e:
-                messagebox.showerror("Fetch Error", f"Error fetching data from vCenter:\n{str(e)}")
-            finally:
-                progress_window.destroy()
-        
-        threading.Thread(target=fetch_thread, daemon=True).start()
-    
+          
     def fetch_cpu_ready_metrics(self, content, hosts, start_date, end_date, interval_seconds):
         """Fetch CPU Ready metrics for all hosts with proper interval handling"""
         perf_manager = content.perfManager
@@ -1717,6 +2327,154 @@ class ModernCPUAnalyzer:
         container.Destroy()
         print(f"DEBUG: Found {len(hosts)} connected hosts")
         return hosts
+
+    def show_analysis_summary_dialog(self, processed_hosts, total_records, warnings):
+        """Show detailed analysis summary for manual triggers"""
+        summary_window = self.create_styled_popup_window("📊 Analysis Summary", 500, 350)
+        
+        main_frame = tk.Frame(summary_window, bg=self.colors['bg_primary'])
+        main_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
+        
+        # Title
+        title_label = tk.Label(main_frame, 
+                            text="📊 Analysis Complete",
+                            bg=self.colors['bg_primary'],
+                            fg=self.colors['text_primary'],
+                            font=('Segoe UI', 14, 'bold'))
+        title_label.pack(pady=(0, 20))
+        
+        # Summary stats
+        stats_frame = tk.Frame(main_frame, bg=self.colors['bg_primary'])
+        stats_frame.pack(fill=tk.X, pady=(0, 15))
+        
+        stats_text = f"""✅ Successfully processed {processed_hosts} hosts
+    📊 Total records analyzed: {total_records:,}
+    ⚙️ Analysis interval: {self.current_interval}
+    📅 Analysis time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"""
+        
+        if warnings:
+            stats_text += f"\n⚠️ Processing warnings: {len(warnings)}"
+        
+        stats_label = tk.Label(stats_frame, text=stats_text,
+                            bg=self.colors['bg_primary'],
+                            fg=self.colors['text_primary'],
+                            font=('Segoe UI', 10),
+                            justify=tk.LEFT)
+        stats_label.pack(anchor=tk.W)
+        
+        # Host summary if available
+        if hasattr(self, 'processed_data') and self.processed_data is not None:
+            host_summary_frame = tk.Frame(main_frame, bg=self.colors['bg_primary'])
+            host_summary_frame.pack(fill=tk.X, pady=(0, 15))
+            
+            # Calculate quick stats
+            critical_hosts = 0
+            warning_hosts = 0
+            healthy_hosts = 0
+            
+            for hostname in self.processed_data['Hostname'].unique():
+                avg_cpu = self.processed_data[self.processed_data['Hostname'] == hostname]['CPU_Ready_Percent'].mean()
+                if avg_cpu >= self.critical_threshold.get():
+                    critical_hosts += 1
+                elif avg_cpu >= self.warning_threshold.get():
+                    warning_hosts += 1
+                else:
+                    healthy_hosts += 1
+            
+            host_summary = f"""🔴 Critical hosts: {critical_hosts}
+    🟡 Warning hosts: {warning_hosts}
+    🟢 Healthy hosts: {healthy_hosts}"""
+            
+            host_label = tk.Label(host_summary_frame, text=host_summary,
+                                bg=self.colors['bg_primary'],
+                                fg=self.colors['text_primary'],
+                                font=('Segoe UI', 10),
+                                justify=tk.LEFT)
+            host_label.pack(anchor=tk.W)
+        
+        # Action buttons
+        button_frame = tk.Frame(main_frame, bg=self.colors['bg_primary'])
+        button_frame.pack(fill=tk.X, pady=(15, 0))
+        
+        if warnings:
+            warnings_btn = tk.Button(button_frame, text="⚠️ View Warnings",
+                                command=lambda: [summary_window.destroy(), self.show_processing_warnings(warnings)],
+                                bg=self.colors['warning'], fg='white',
+                                font=('Segoe UI', 9, 'bold'),
+                                relief='flat', borderwidth=0,
+                                padx=15, pady=6)
+            warnings_btn.pack(side=tk.LEFT, padx=(0, 10))
+        
+        results_btn = tk.Button(button_frame, text="📊 View Results",
+                            command=lambda: [summary_window.destroy(), self.notebook.select(1)],
+                            bg=self.colors['accent_blue'], fg='white',
+                            font=('Segoe UI', 9, 'bold'),
+                            relief='flat', borderwidth=0,
+                            padx=15, pady=6)
+        results_btn.pack(side=tk.LEFT, padx=(0, 10))
+        
+        close_btn = tk.Button(button_frame, text="✓ Close",
+                            command=summary_window.destroy,
+                            bg=self.colors['bg_secondary'], fg=self.colors['text_primary'],
+                            font=('Segoe UI', 9, 'bold'),
+                            relief='flat', borderwidth=0,
+                            padx=15, pady=6)
+        close_btn.pack(side=tk.RIGHT)
+
+    def show_processing_warnings(self, warnings):
+        """Show processing warnings in a non-blocking way"""
+        if not warnings:
+            return
+        
+        # Create warning popup
+        warning_window = self.create_styled_popup_window("⚠️ Processing Warnings", 600, 400)
+        
+        main_frame = tk.Frame(warning_window, bg=self.colors['bg_primary'])
+        main_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
+        
+        # Title
+        title_label = tk.Label(main_frame, 
+                            text=f"⚠️ {len(warnings)} Processing Warnings",
+                            bg=self.colors['bg_primary'],
+                            fg=self.colors['warning'],
+                            font=('Segoe UI', 12, 'bold'))
+        title_label.pack(pady=(0, 15))
+        
+        # Warning list
+        warning_frame = tk.Frame(main_frame, bg=self.colors['bg_primary'])
+        warning_frame.pack(fill=tk.BOTH, expand=True)
+        
+        # Create scrollable text widget
+        warning_text = self.create_dark_text_widget(warning_frame, wrap=tk.WORD, height=12)
+        warning_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        
+        # Scrollbar
+        warning_scrollbar = ttk.Scrollbar(warning_frame, orient=tk.VERTICAL, command=warning_text.yview)
+        warning_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        warning_text.configure(yscrollcommand=warning_scrollbar.set)
+        
+        # Populate warnings
+        warning_content = "The following issues were encountered during processing:\n\n"
+        for i, warning in enumerate(warnings[:20], 1):  # Limit to first 20 warnings
+            warning_content += f"{i}. {warning}\n\n"
+        
+        if len(warnings) > 20:
+            warning_content += f"... and {len(warnings) - 20} more warnings.\n"
+        
+        warning_content += "\nNote: These warnings don't prevent analysis but may indicate data quality issues."
+        
+        warning_text.insert(1.0, warning_content)
+        warning_text.config(state='disabled')  # Make read-only
+        
+        # Close button
+        close_btn = tk.Button(main_frame, text="✓ Continue",
+                            command=warning_window.destroy,
+                            bg=self.colors['accent_blue'], fg='white',
+                            font=('Segoe UI', 9, 'bold'),
+                            relief='flat', borderwidth=0,
+                            padx=20, pady=8)
+        close_btn.pack(pady=(15, 0))
+
       
     # Analysis Methods
     def on_interval_change(self, event):
@@ -1725,137 +2483,560 @@ class ModernCPUAnalyzer:
         if self.processed_data is not None:
             self.calculate_cpu_ready()
     
-    def calculate_cpu_ready(self):
-        """Calculate CPU Ready percentages"""
+    def calculate_cpu_ready(self, auto_triggered=False):
+        """Calculate CPU Ready percentages with enhanced data processing and validation - COMPLETE UPDATED VERSION"""
         if not self.data_frames:
-            messagebox.showwarning("No Data", "Please import files or fetch data from vCenter first")
-            return
+            if not auto_triggered:
+                messagebox.showwarning("No Data", "Please import files or fetch data from vCenter first")
+            else:
+                self.show_smart_notification("⚠️ No data available for analysis", 3000)
+            return False
         
-        self.show_progress("Calculating CPU Ready percentages...")
+        # Mark analysis as active in workflow
+        if hasattr(self, 'update_workflow_indicator'):
+            self.update_workflow_indicator('analyze', 'active')
+        
+        # Show progress with context-aware message
+        progress_msg = "Auto-analyzing CPU Ready data..." if auto_triggered else "Calculating CPU Ready percentages..."
+        self.show_progress(progress_msg)
         
         try:
             combined_data = []
+            processed_hosts = 0
+            total_records = 0
+            processing_warnings = []
             
-            for df in self.data_frames:
-                print(f"DEBUG: Processing dataframe with columns: {list(df.columns)}")
+            print(f"DEBUG: Starting analysis with {len(self.data_frames)} dataframes")
+            
+            # Process each dataframe
+            for df_index, df in enumerate(self.data_frames):
+                print(f"DEBUG: Processing dataframe {df_index + 1}/{len(self.data_frames)} with {len(df)} rows")
+                print(f"DEBUG: Columns: {list(df.columns)}")
                 
-                # Find time and ready columns
-                time_col = next((col for col in df.columns if 'time' in col.lower()), None)
-                ready_cols = [col for col in df.columns if 'ready for' in col.lower()]
+                # Find time and ready columns with improved detection
+                time_col = None
+                for col in df.columns:
+                    if any(keyword in col.lower() for keyword in ['time', 'timestamp', 'date']):
+                        time_col = col
+                        break
+                
+                ready_cols = []
+                for col in df.columns:
+                    if any(keyword in col.lower() for keyword in ['ready for', 'cpu ready', 'cpuready']):
+                        ready_cols.append(col)
                 
                 print(f"DEBUG: Found time column: {time_col}")
                 print(f"DEBUG: Found ready columns: {ready_cols}")
                 
-                if not time_col or not ready_cols:
-                    print("DEBUG: Missing required columns, skipping this dataframe")
+                if not time_col:
+                    warning_msg = f"No time column found in dataframe {df_index + 1}"
+                    processing_warnings.append(warning_msg)
+                    print(f"DEBUG: {warning_msg}")
+                    continue
+                    
+                if not ready_cols:
+                    warning_msg = f"No CPU Ready columns found in dataframe {df_index + 1}"
+                    processing_warnings.append(warning_msg)
+                    print(f"DEBUG: {warning_msg}")
                     continue
                 
                 # Process each ready column (each represents a different host)
                 for ready_col in ready_cols:
                     print(f"DEBUG: Processing ready column: {ready_col}")
                     
-                    # Extract hostname from column name
-                    if '$' in ready_col:
-                        # Format: "Ready for $hostname"
-                        hostname_match = re.search(r'\$(\w+)', ready_col)
-                        hostname = hostname_match.group(1) if hostname_match else "Unknown"
-                    else:
-                        # Format: "Ready for full.hostname.domain" or "Ready for IP"
-                        hostname_match = re.search(r'Ready for (.+)', ready_col)
-                        if hostname_match:
-                            full_hostname = hostname_match.group(1).strip()
-                            
-                            # Check if it's an IP address
-                            if re.match(r'^\d+\.\d+\.\d+\.\d+$', full_hostname):
-                                # Use the full IP as hostname for clarity
-                                hostname = f"Host-{full_hostname.replace('.', '-')}"
-                                print(f"DEBUG: IP address detected, using hostname: {hostname}")
-                            else:
-                                # Extract just the first part of the hostname
-                                hostname = full_hostname.split('.')[0]
-                                print(f"DEBUG: Extracted hostname '{hostname}' from '{full_hostname}'")
-                        else:
-                            hostname = "Unknown"
-                            print("DEBUG: Could not extract hostname, using 'Unknown'")
+                    # Extract hostname with enhanced logic
+                    hostname = self.extract_hostname_from_column(ready_col)
+                    print(f"DEBUG: Extracted hostname: {hostname}")
                     
-                    print(f"DEBUG: Final hostname: {hostname}")
-                    
-                    # Check if we already have data for this hostname (avoid duplicates)
+                    # Check for duplicates across all dataframes
                     existing_hostnames = [data['Hostname'].iloc[0] for data in combined_data if len(data) > 0]
                     if hostname in existing_hostnames:
                         print(f"DEBUG: Hostname {hostname} already processed, skipping duplicate")
                         continue
                     
                     # Process data for this host
-                    subset = df[[time_col, ready_col, 'source_file']].copy()
-                    subset.columns = ['Time', 'CPU_Ready_Sum', 'Source_File']
-                    subset['Hostname'] = hostname
-                    
-                    # Remove rows with null/zero values
-                    subset = subset.dropna()
-                    subset = subset[subset['CPU_Ready_Sum'] != 0]
-                    
-                    print(f"DEBUG: Created subset with {len(subset)} rows for host {hostname}")
-                    
-                    if len(subset) == 0:
-                        print(f"DEBUG: No valid data for host {hostname}, skipping")
+                    try:
+                        # Create subset with required columns
+                        required_cols = [time_col, ready_col]
+                        if 'source_file' in df.columns:
+                            required_cols.append('source_file')
+                            subset = df[required_cols].copy()
+                            subset.columns = ['Time', 'CPU_Ready_Sum', 'Source_File']
+                        else:
+                            subset = df[required_cols].copy()
+                            subset.columns = ['Time', 'CPU_Ready_Sum']
+                            subset['Source_File'] = f'dataframe_{df_index + 1}'
+                        
+                        subset['Hostname'] = hostname
+                        
+                        # Data cleaning and validation
+                        initial_rows = len(subset)
+                        
+                        # Remove rows with missing data
+                        subset = subset.dropna(subset=['Time', 'CPU_Ready_Sum'])
+                        after_dropna = len(subset)
+                        
+                        # Remove zero values (typically indicates no CPU Ready data)
+                        subset = subset[subset['CPU_Ready_Sum'] != 0]
+                        valid_rows = len(subset)
+                        
+                        print(f"DEBUG: Host {hostname}: {initial_rows} initial → {after_dropna} after dropna → {valid_rows} valid rows")
+                        
+                        if valid_rows == 0:
+                            warning_msg = f"No valid CPU Ready data for host {hostname}"
+                            processing_warnings.append(warning_msg)
+                            print(f"DEBUG: {warning_msg}")
+                            continue
+                        
+                        if valid_rows < initial_rows * 0.5:
+                            warning_msg = f"Host {hostname}: Lost {initial_rows - valid_rows} of {initial_rows} rows during cleaning"
+                            processing_warnings.append(warning_msg)
+                            print(f"DEBUG: {warning_msg}")
+                        
+                        # Enhanced timestamp processing
+                        try:
+                            subset['Time'] = self.clean_timestamps(subset['Time'])
+                        except Exception as time_error:
+                            warning_msg = f"Timestamp processing error for {hostname}: {time_error}"
+                            processing_warnings.append(warning_msg)
+                            print(f"DEBUG: {warning_msg}")
+                            continue
+                        
+                        # ENHANCED CPU Ready calculation with intelligent data format detection
+                        interval_seconds = self.intervals[self.current_interval]
+                        print(f"DEBUG: Using interval: {self.current_interval} ({interval_seconds} seconds)")
+                        
+                        # Analyze sample values to determine data format
+                        sample_values = subset['CPU_Ready_Sum'].head(10)
+                        avg_sample = sample_values.mean()
+                        max_sample = sample_values.max()
+                        min_sample = sample_values.min()
+                        
+                        print(f"DEBUG: Sample statistics - Min: {min_sample:.2f}, Max: {max_sample:.2f}, Avg: {avg_sample:.2f}")
+                        
+                        # Data format detection and conversion
+                        if avg_sample > 10000:
+                            # Data is likely in microseconds or very high milliseconds
+                            subset['CPU_Ready_Percent'] = (subset['CPU_Ready_Sum'] / (interval_seconds * 10000)) * 100
+                            print(f"DEBUG: Data appears to be in microseconds, applying conversion factor")
+                            conversion_applied = "microseconds"
+                        elif avg_sample > 1000:
+                            # Data is likely in milliseconds (standard vCenter format)
+                            subset['CPU_Ready_Percent'] = (subset['CPU_Ready_Sum'] / (interval_seconds * 1000)) * 100
+                            print(f"DEBUG: Data appears to be in milliseconds (standard format)")
+                            conversion_applied = "milliseconds"
+                        elif avg_sample > 100:
+                            # Data might be in centipercent or wrong units
+                            subset['CPU_Ready_Percent'] = subset['CPU_Ready_Sum'] / 100
+                            print(f"DEBUG: Data appears to be in centipercent, dividing by 100")
+                            conversion_applied = "centipercent"
+                        elif avg_sample > 10:
+                            # Data might be in permille (per thousand)
+                            subset['CPU_Ready_Percent'] = subset['CPU_Ready_Sum'] / 10
+                            print(f"DEBUG: Data appears to be in permille, dividing by 10")
+                            conversion_applied = "permille"
+                        else:
+                            # Data appears to be already in percentage or reasonable range
+                            subset['CPU_Ready_Percent'] = subset['CPU_Ready_Sum']
+                            print(f"DEBUG: Data appears to be in percentage format already")
+                            conversion_applied = "percentage"
+                        
+                        # Post-conversion validation and outlier handling
+                        post_avg = subset['CPU_Ready_Percent'].mean()
+                        post_max = subset['CPU_Ready_Percent'].max()
+                        post_min = subset['CPU_Ready_Percent'].min()
+                        
+                        print(f"DEBUG: After conversion - Min: {post_min:.2f}%, Max: {post_max:.2f}%, Avg: {post_avg:.2f}%")
+                        
+                        # Handle extreme outliers (>100% CPU Ready is theoretically impossible but can happen due to measurement issues)
+                        extreme_outliers = subset[subset['CPU_Ready_Percent'] > 100]
+                        if len(extreme_outliers) > 0:
+                            outlier_pct = (len(extreme_outliers) / len(subset)) * 100
+                            print(f"DEBUG: Found {len(extreme_outliers)} extreme outliers for {hostname} ({outlier_pct:.1f}% of data)")
+                            
+                            if outlier_pct > 50:
+                                # If more than 50% are outliers, the conversion is probably wrong
+                                warning_msg = f"Host {hostname}: {outlier_pct:.1f}% of values >100% - possible incorrect data format detection"
+                                processing_warnings.append(warning_msg)
+                                
+                                # Try alternative conversion
+                                if conversion_applied == "milliseconds":
+                                    subset['CPU_Ready_Percent'] = subset['CPU_Ready_Sum'] / 1000
+                                    print(f"DEBUG: Retrying with different conversion factor")
+                                    post_avg = subset['CPU_Ready_Percent'].mean()
+                                    post_max = subset['CPU_Ready_Percent'].max()
+                            
+                            # Cap values at reasonable maximum (200% to allow for some measurement variance)
+                            reasonable_max = 200
+                            subset.loc[subset['CPU_Ready_Percent'] > reasonable_max, 'CPU_Ready_Percent'] = reasonable_max
+                            
+                            capped_count = len(subset[subset['CPU_Ready_Percent'] == reasonable_max])
+                            if capped_count > 0:
+                                print(f"DEBUG: Capped {capped_count} values at {reasonable_max}%")
+                        
+                        # Final statistics
+                        final_avg = subset['CPU_Ready_Percent'].mean()
+                        final_max = subset['CPU_Ready_Percent'].max()
+                        final_min = subset['CPU_Ready_Percent'].min()
+                        final_std = subset['CPU_Ready_Percent'].std()
+                        
+                        print(f"DEBUG: Host {hostname} - FINAL stats:")
+                        print(f"  Min: {final_min:.2f}%, Max: {final_max:.2f}%, Avg: {final_avg:.2f}%, Std: {final_std:.2f}%")
+                        print(f"  Conversion applied: {conversion_applied}")
+                        print(f"  Sample values: {subset['CPU_Ready_Percent'].head().tolist()}")
+                        
+                        # Quality check - warn if data seems unusual
+                        if final_avg > 50:
+                            warning_msg = f"Host {hostname}: Very high average CPU Ready ({final_avg:.1f}%) - verify data accuracy"
+                            processing_warnings.append(warning_msg)
+                        elif final_max < 1 and final_avg < 0.1:
+                            warning_msg = f"Host {hostname}: Very low CPU Ready values ({final_avg:.3f}%) - may indicate low load or incorrect scaling"
+                            processing_warnings.append(warning_msg)
+                        
+                        combined_data.append(subset)
+                        processed_hosts += 1
+                        total_records += valid_rows
+                        
+                    except Exception as host_error:
+                        error_msg = f"Error processing host {hostname}: {str(host_error)}"
+                        processing_warnings.append(error_msg)
+                        print(f"DEBUG: {error_msg}")
+                        import traceback
+                        traceback.print_exc()
                         continue
-                    
-                    # Fix timestamp format issues from vCenter
-                    def clean_timestamp(ts):
-                        if isinstance(ts, str):
-                            # Remove trailing Z if there's already timezone info
-                            if '+' in ts and ts.endswith('Z'):
-                                ts = ts[:-1]
-                            # Handle various vCenter timestamp formats
-                            try:
-                                return pd.to_datetime(ts, utc=True)
-                            except:
-                                # Try removing timezone info and adding Z
-                                if '+' in ts:
-                                    ts = ts.split('+')[0] + 'Z'
-                                return pd.to_datetime(ts, utc=True)
-                        return pd.to_datetime(ts, utc=True)
-                    
-                    # Convert time to datetime with proper handling
-                    subset['Time'] = subset['Time'].apply(clean_timestamp)
-                    
-                    # Calculate CPU Ready %
-                    interval_seconds = self.intervals[self.current_interval]
-                    subset['CPU_Ready_Percent'] = (subset['CPU_Ready_Sum'] / (interval_seconds * 1000)) * 100
-                    
-                    print(f"DEBUG: Sample CPU Ready values for {hostname}: {subset['CPU_Ready_Percent'].head().tolist()}")
-                    
-                    combined_data.append(subset)
             
+            # Final validation check
             if not combined_data:
-                messagebox.showerror("Processing Error", "No valid data found in imported files")
-                return
+                error_msg = "No valid CPU Ready data found in any imported files"
+                detailed_msg = error_msg
+                if processing_warnings:
+                    detailed_msg += f"\n\nIssues encountered:\n" + "\n".join(processing_warnings[:5])
                 
+                if auto_triggered:
+                    self.show_smart_notification(f"❌ {error_msg}", 4000)
+                else:
+                    messagebox.showerror("Processing Error", detailed_msg)
+                return False
+            
+            # Combine all processed data
             self.processed_data = pd.concat(combined_data, ignore_index=True)
             
-            print(f"DEBUG: Final combined data has {len(self.processed_data)} rows")
-            print(f"DEBUG: Unique hostnames found: {self.processed_data['Hostname'].unique().tolist()}")
-            print(f"DEBUG: Records per hostname:")
-            for hostname in self.processed_data['Hostname'].unique():
-                count = len(self.processed_data[self.processed_data['Hostname'] == hostname])
-                print(f"  - {hostname}: {count} records")
+            # Final data summary
+            unique_hosts = self.processed_data['Hostname'].unique()
+            date_range_start = self.processed_data['Time'].min()
+            date_range_end = self.processed_data['Time'].max()
+            
+            print(f"DEBUG: FINAL ANALYSIS SUMMARY:")
+            print(f"  Total records: {len(self.processed_data):,}")
+            print(f"  Unique hosts: {len(unique_hosts)}")
+            print(f"  Date range: {date_range_start} to {date_range_end}")
+            print(f"  Processing warnings: {len(processing_warnings)}")
+            
+            # Per-host final summary
+            for hostname in sorted(unique_hosts):
+                host_final = self.processed_data[self.processed_data['Hostname'] == hostname]
+                print(f"  {hostname}: {len(host_final)} records, avg {host_final['CPU_Ready_Percent'].mean():.2f}% CPU Ready")
+            
+            # Mark analysis complete in workflow
+            if hasattr(self, 'workflow_state'):
+                self.workflow_state['analysis_complete'] = True
+                self.workflow_state['last_action'] = 'analyze'
+            
+            if hasattr(self, 'update_workflow_indicator'):
+                self.update_workflow_indicator('analyze', 'complete')
+                self.update_workflow_indicator('visualize', 'active')
             
             # Update all displays
-            self.update_results_display()
-            self.update_chart()
-            self.update_host_list()
-            self.apply_thresholds()
+            try:
+                self.update_results_display()
+                self.update_chart()
+                self.update_host_list()
+                self.apply_thresholds()
+                
+                # Mark visualization complete
+                if hasattr(self, 'update_workflow_indicator'):
+                    self.update_workflow_indicator('visualize', 'complete')
+            except Exception as display_error:
+                print(f"DEBUG: Error updating displays: {display_error}")
+                # Continue anyway, data processing was successful
             
-            self.status_label.config(text=f"Analysis complete - {len(self.processed_data)} records processed")
+            # Enhanced user feedback with summary
+            if auto_triggered:
+                # Auto-triggered - show smart notification with summary
+                summary_msg = f"✅ Analysis complete! {processed_hosts} hosts, {total_records:,} records"
+                
+                # Add health insights to notification
+                critical_hosts = len([h for h in unique_hosts 
+                                    if self.processed_data[self.processed_data['Hostname'] == h]['CPU_Ready_Percent'].mean() >= self.critical_threshold.get()])
+                warning_hosts = len([h for h in unique_hosts 
+                                if self.warning_threshold.get() <= self.processed_data[self.processed_data['Hostname'] == h]['CPU_Ready_Percent'].mean() < self.critical_threshold.get()])
+                
+                if critical_hosts > 0:
+                    summary_msg += f" | ⚠️ {critical_hosts} critical hosts"
+                elif warning_hosts > 0:
+                    summary_msg += f" | 🟡 {warning_hosts} warning hosts"
+                else:
+                    summary_msg += " | 🟢 All hosts healthy"
+                
+                # Show warnings if any
+                if processing_warnings:
+                    summary_msg += f" | ⚠️ {len(processing_warnings)} warnings"
+                
+                self.show_smart_notification(summary_msg, 5000)
+                
+                # If there were significant warnings, offer details
+                if len(processing_warnings) > 0:
+                    self.root.after(3000, lambda: self.show_processing_warnings(processing_warnings))
+                
+            else:
+                # Manual trigger - use traditional status update with detailed feedback
+                status_msg = f"Analysis complete - {processed_hosts} hosts analyzed, {total_records:,} records processed"
+                
+                if processing_warnings:
+                    status_msg += f" ({len(processing_warnings)} warnings)"
+                
+                self.status_label.config(text=status_msg)
+                
+                # Show detailed results dialog for manual triggers
+                if processing_warnings:
+                    self.show_analysis_summary_dialog(processed_hosts, total_records, processing_warnings)
+            
+            # Auto-switch logic for auto-triggered analysis
+            if auto_triggered and hasattr(self, 'auto_switch_tabs') and self.auto_switch_tabs.get():
+                self.root.after(2000, self.switch_to_analysis_with_highlight)
+            
+            # Update analysis timestamp
+            if hasattr(self, 'last_analysis_time'):
+                self.last_analysis_time = datetime.now()
+            
+            return True  # Indicate successful analysis
             
         except Exception as e:
             print(f"DEBUG: Full error details: {e}")
             import traceback
             traceback.print_exc()
-            messagebox.showerror("Calculation Error", f"Error calculating CPU Ready %:\n{str(e)}")
+            
+            # Mark analysis as failed
+            if hasattr(self, 'update_workflow_indicator'):
+                self.update_workflow_indicator('analyze', 'pending')
+            
+            error_msg = f"Error calculating CPU Ready percentages:\n{str(e)}"
+            if auto_triggered:
+                self.show_smart_notification("❌ Analysis failed - check data format", 4000)
+            else:
+                messagebox.showerror("Calculation Error", error_msg)
+            
+            return False  # Indicate failed analysis
+            
         finally:
             self.hide_progress()
+
+    def extract_hostname_from_column(self, ready_col):
+        """Extract hostname from CPU Ready column name with enhanced logic"""
+        try:
+            if '$' in ready_col:
+                # Format: "Ready for $hostname"
+                hostname_match = re.search(r'\$(\w+)', ready_col)
+                hostname = hostname_match.group(1) if hostname_match else "Unknown"
+            else:
+                # Format: "Ready for full.hostname.domain" or "Ready for IP"
+                hostname_match = re.search(r'Ready for (.+)', ready_col)
+                if hostname_match:
+                    full_hostname = hostname_match.group(1).strip()
+                    
+                    # Check if it's an IP address
+                    if re.match(r'^\d+\.\d+\.\d+\.\d+$', full_hostname):
+                        # Use a cleaner IP-based hostname
+                        hostname = f"Host-{full_hostname.replace('.', '-')}"
+                        print(f"DEBUG: IP address detected, using hostname: {hostname}")
+                    else:
+                        # Extract just the first part of the hostname for cleaner display
+                        hostname = full_hostname.split('.')[0]
+                        print(f"DEBUG: Extracted hostname '{hostname}' from '{full_hostname}'")
+                else:
+                    hostname = "Unknown-Host"
+                    print("DEBUG: Could not extract hostname, using 'Unknown-Host'")
+            
+            return hostname
+            
+        except Exception as e:
+            print(f"DEBUG: Error extracting hostname from '{ready_col}': {e}")
+            return "Error-Host"
+
+    def clean_timestamps(self, timestamp_series):
+        """Clean and standardize timestamps with enhanced error handling"""
+        def clean_single_timestamp(ts):
+            try:
+                if isinstance(ts, str):
+                    # Remove trailing Z if there's already timezone info
+                    if '+' in ts and ts.endswith('Z'):
+                        ts = ts[:-1]
+                    # Handle various vCenter timestamp formats
+                    try:
+                        return pd.to_datetime(ts, utc=True)
+                    except:
+                        # Try removing timezone info and adding Z
+                        if '+' in ts:
+                            ts = ts.split('+')[0] + 'Z'
+                        return pd.to_datetime(ts, utc=True)
+                return pd.to_datetime(ts, utc=True)
+            except Exception as e:
+                print(f"DEBUG: Timestamp parsing error for '{ts}': {e}")
+                # Return current time as fallback
+                return pd.to_datetime(datetime.now(), utc=True)
+        
+        return timestamp_series.apply(clean_single_timestamp)
+
+    def generate_analysis_summary(self):
+        """Generate comprehensive analysis summary"""
+        if self.processed_data is None:
+            return {}
+        
+        try:
+            unique_hosts = self.processed_data['Hostname'].unique()
+            total_hosts = len(unique_hosts)
+            total_records = len(self.processed_data)
+            
+            # Calculate health statistics
+            critical_count = 0
+            warning_count = 0
+            healthy_count = 0
+            
+            host_stats = []
+            
+            for hostname in unique_hosts:
+                host_data = self.processed_data[self.processed_data['Hostname'] == hostname]
+                avg_cpu = host_data['CPU_Ready_Percent'].mean()
+                max_cpu = host_data['CPU_Ready_Percent'].max()
+                
+                if avg_cpu >= self.critical_threshold.get():
+                    critical_count += 1
+                    status = 'critical'
+                elif avg_cpu >= self.warning_threshold.get():
+                    warning_count += 1
+                    status = 'warning'
+                else:
+                    healthy_count += 1
+                    status = 'healthy'
+                
+                host_stats.append({
+                    'hostname': hostname,
+                    'avg_cpu': avg_cpu,
+                    'max_cpu': max_cpu,
+                    'status': status,
+                    'records': len(host_data)
+                })
+            
+            # Overall statistics
+            overall_avg = self.processed_data['CPU_Ready_Percent'].mean()
+            overall_max = self.processed_data['CPU_Ready_Percent'].max()
+            
+            # Time range
+            time_range = {
+                'start': self.processed_data['Time'].min(),
+                'end': self.processed_data['Time'].max(),
+                'duration': self.processed_data['Time'].max() - self.processed_data['Time'].min()
+            }
+            
+            summary = {
+                'total_hosts': total_hosts,
+                'total_records': total_records,
+                'critical_hosts': critical_count,
+                'warning_hosts': warning_count,
+                'healthy_hosts': healthy_count,
+                'overall_avg_cpu': overall_avg,
+                'overall_max_cpu': overall_max,
+                'time_range': time_range,
+                'host_stats': host_stats,
+                'analysis_time': datetime.now()
+            }
+            
+            return summary
+            
+        except Exception as e:
+            print(f"DEBUG: Error generating analysis summary: {e}")
+            return {}
+
+    def show_analysis_ready_prompt(self, summary):
+        """Show analysis completion prompt with summary"""
+        if not summary:
+            return
+        
+        # Create a rich prompt with analysis insights
+        critical_hosts = summary.get('critical_hosts', 0)
+        warning_hosts = summary.get('warning_hosts', 0)
+        total_hosts = summary.get('total_hosts', 0)
+        
+        # Build message with insights
+        message_parts = [f"✅ Analysis complete! Processed {total_hosts} hosts"]
+        
+        if critical_hosts > 0:
+            message_parts.append(f"🔴 {critical_hosts} hosts need immediate attention")
+        elif warning_hosts > 0:
+            message_parts.append(f"🟡 {warning_hosts} hosts need monitoring")
+        else:
+            message_parts.append("🟢 All hosts performing well")
+        
+        message = "\n".join(message_parts)
+        
+        # Show prompt with multiple action options
+        self.show_enhanced_action_prompt(
+            message=message,
+            actions=[
+                ("📊 View Analysis", lambda: self.notebook.select(1)),
+                ("📈 Show Charts", lambda: self.notebook.select(2)),
+                ("🖥️ Host Analysis", lambda: self.notebook.select(3))
+            ]
+        )
+
+    def show_enhanced_action_prompt(self, message, actions):
+        """Show enhanced action prompt with multiple options"""
+        prompt_frame = tk.Frame(self.root,
+                            bg=self.colors['bg_tertiary'],
+                            relief='solid',
+                            borderwidth=1)
+        
+        content_frame = tk.Frame(prompt_frame, bg=self.colors['bg_tertiary'])
+        content_frame.pack(padx=20, pady=15)
+        
+        # Message
+        message_label = tk.Label(content_frame,
+                            text=message,
+                            bg=self.colors['bg_tertiary'],
+                            fg=self.colors['text_primary'],
+                            font=('Segoe UI', 11),
+                            justify=tk.LEFT)
+        message_label.pack(pady=(0, 15))
+        
+        # Action buttons
+        button_frame = tk.Frame(content_frame, bg=self.colors['bg_tertiary'])
+        button_frame.pack()
+        
+        for i, (text, callback) in enumerate(actions):
+            btn = tk.Button(button_frame,
+                        text=text,
+                        command=lambda cb=callback: [cb(), prompt_frame.destroy()],
+                        bg=self.colors['accent_blue'] if i == 0 else self.colors['bg_secondary'],
+                        fg='white' if i == 0 else self.colors['text_primary'],
+                        font=('Segoe UI', 9, 'bold' if i == 0 else 'normal'),
+                        relief='flat', borderwidth=0,
+                        padx=12, pady=6)
+            btn.pack(side=tk.LEFT, padx=(0, 8) if i < len(actions)-1 else 0)
+        
+        # Dismiss button
+        dismiss_btn = tk.Button(button_frame,
+                            text="Later",
+                            command=prompt_frame.destroy,
+                            bg=self.colors['bg_primary'],
+                            fg=self.colors['text_secondary'],
+                            font=('Segoe UI', 9),
+                            relief='flat', borderwidth=0,
+                            padx=12, pady=6)
+        dismiss_btn.pack(side=tk.LEFT, padx=(15, 0))
+        
+        # Position and auto-hide
+        prompt_frame.place(relx=0.5, rely=0.15, anchor='n')
+        self.root.after(15000, prompt_frame.destroy)  # Auto-hide after 15s
     
     def update_results_display(self):
         """Update analysis results table"""
@@ -1922,7 +3103,7 @@ class ModernCPUAnalyzer:
         return max(0, min(100, score))
     
     def update_chart(self):
-        """Update visualization chart with dark theme styling"""
+        """Update Visualisation chart with dark theme styling"""
         if self.processed_data is None:
             return
         
@@ -2018,7 +3199,7 @@ class ModernCPUAnalyzer:
         return [self.hosts_listbox.get(i) for i in selected_indices]
     
     def analyze_multiple_removal_impact(self):
-        """Analyze impact of removing multiple hosts"""
+        """Analyse impact of removing multiple hosts"""
         if self.processed_data is None:
             messagebox.showwarning("No Data", "Please calculate CPU Ready % first")
             return
@@ -2160,21 +3341,25 @@ Thresholds: Warning {warning_level}% | Critical {critical_level}%
         self.health_text.insert(1.0, report)
     
     def show_heatmap_calendar(self):
-        """Display CPU Ready data as a heat map calendar"""
+        """Display CPU Ready data as a heat map calendar with consistent styling"""
         if self.processed_data is None:
             messagebox.showwarning("No Data", "Please calculate CPU Ready % first")
             return
         
-        # Create new window for heatmap
-        heatmap_window = tk.Toplevel(self.root)
-        heatmap_window.title("📅 CPU Ready Heat Map Calendar")
-        heatmap_window.geometry("1200x800")
-        heatmap_window.transient(self.root)
+        # Create styled popup window
+        heatmap_window = self.create_styled_popup_window("📅 CPU Ready Heat Map Calendar", 1200, 800)
+        
+        # Main container with dark background
+        main_container = tk.Frame(heatmap_window, bg=self.colors['bg_primary'])
+        main_container.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
         
         # Create matplotlib figure with modern styling
         num_hosts = len(self.processed_data['Hostname'].unique())
         fig_height = max(8, num_hosts * 2)
         fig, axes = plt.subplots(nrows=num_hosts, ncols=1, figsize=(14, fig_height))
+        
+        # Set dark theme for the figure
+        fig.patch.set_facecolor(self.colors['bg_primary'])
         
         if num_hosts == 1:
             axes = [axes]
@@ -2189,6 +3374,8 @@ Thresholds: Warning {warning_level}% | Critical {critical_level}%
         
         for idx, hostname in enumerate(sorted(self.processed_data['Hostname'].unique())):
             ax = axes[idx] if num_hosts > 1 else axes[0]
+            ax.set_facecolor(self.colors['bg_secondary'])
+            
             host_data = self.processed_data[self.processed_data['Hostname'] == hostname].copy()
             
             # Group by date and calculate daily average
@@ -2218,13 +3405,21 @@ Thresholds: Warning {warning_level}% | Critical {critical_level}%
             
             # Create heatmap
             im = ax.imshow(calendar_array, cmap=custom_cmap, aspect='auto', 
-                          vmin=0, vmax=max_val, interpolation='nearest')
+                        vmin=0, vmax=max_val, interpolation='nearest')
             
-            # Styling
+            # Dark theme styling
             ax.set_title(f'{hostname} - Daily CPU Ready %', 
-                        fontsize=12, fontweight='bold', pad=10)
-            ax.set_xlabel('Day of Week')
-            ax.set_ylabel('Week')
+                        fontsize=12, fontweight='bold', pad=10,
+                        color=self.colors['text_primary'])
+            ax.set_xlabel('Day of Week', color=self.colors['text_primary'])
+            ax.set_ylabel('Week', color=self.colors['text_primary'])
+            
+            # Style the axes
+            ax.tick_params(colors=self.colors['text_secondary'])
+            ax.spines['bottom'].set_color(self.colors['border'])
+            ax.spines['top'].set_color(self.colors['border'])
+            ax.spines['left'].set_color(self.colors['border'])
+            ax.spines['right'].set_color(self.colors['border'])
             
             # Day labels
             days = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
@@ -2238,192 +3433,370 @@ Thresholds: Warning {warning_level}% | Critical {critical_level}%
                     if value >= warning_threshold:
                         text_color = 'white' if value > max_val * 0.6 else 'black'
                         ax.text(day_idx, week_idx, f'{value:.1f}', 
-                               ha='center', va='center', fontsize=8, 
-                               color=text_color, fontweight='bold')
+                            ha='center', va='center', fontsize=8, 
+                            color=text_color, fontweight='bold')
             
-            # Colorbar
+            # Colorbar with dark styling
             cbar = plt.colorbar(im, ax=ax, shrink=0.8)
-            cbar.set_label('CPU Ready %', rotation=270, labelpad=15)
+            cbar.set_label('CPU Ready %', rotation=270, labelpad=15, 
+                        color=self.colors['text_primary'])
+            cbar.ax.tick_params(colors=self.colors['text_secondary'])
         
         plt.tight_layout(pad=2.0)
         
-        # Embed in window
-        canvas = FigureCanvasTkAgg(fig, master=heatmap_window)
+        # Embed in window with dark background
+        canvas_frame = tk.Frame(main_container, bg=self.colors['bg_primary'])
+        canvas_frame.pack(fill=tk.BOTH, expand=True)
+        
+        canvas = FigureCanvasTkAgg(fig, master=canvas_frame)
         canvas.draw()
-        canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+        canvas.get_tk_widget().configure(bg=self.colors['bg_primary'])
         
-        # Add legend
-        legend_frame = ttk.Frame(heatmap_window)
-        legend_frame.pack(fill=tk.X, padx=15, pady=(0, 10))
+        # Add styled legend frame
+        legend_frame = self.create_styled_frame(main_container, "🌡️ Heat Map Legend")
+        legend_frame.pack(fill=tk.X, pady=(10, 0))
         
-        ttk.Label(legend_frame, text="🌡️ Heat Map Legend:", 
-                 font=('Segoe UI', 10, 'bold')).pack(anchor=tk.W)
-        ttk.Label(legend_frame, text="🟢 Green: Excellent (0-2%) | 🟡 Yellow: Good (2-5%) | 🟠 Orange: Warning (5-15%) | 🔴 Red: Critical (>15%)", 
-                 style='Subtitle.TLabel').pack(anchor=tk.W, pady=(2, 0))
-    
+        legend_content = tk.Frame(legend_frame, bg=self.colors['bg_primary'])
+        legend_content.pack(fill=tk.X, padx=10, pady=5)
+        
+        tk.Label(legend_content, 
+                text="🟢 Green: Excellent (0-2%) | 🟡 Yellow: Good (2-5%) | 🟠 Orange: Warning (5-15%) | 🔴 Red: Critical (>15%)", 
+                bg=self.colors['bg_primary'],
+                fg=self.colors['text_secondary'],
+                font=('Segoe UI', 10)).pack(anchor=tk.W)
+   
     def show_performance_trends(self):
-        """Show advanced performance trend analysis"""
+        """Show advanced performance trend analysis with consistent styling - COMPLETE UPDATED VERSION"""
         if self.processed_data is None:
             messagebox.showwarning("No Data", "Please calculate CPU Ready % first")
             return
         
-        # Create trends window
-        trends_window = tk.Toplevel(self.root)
-        trends_window.title("📈 Performance Trends Analysis")  
-        trends_window.geometry("1400x900")
-        trends_window.transient(self.root)
+        # Create styled trends window
+        trends_window = self.create_styled_popup_window("📈 Performance Trends Analysis", 1400, 900)
         
-        # Create figure with subplots
+        # Main container
+        main_container = tk.Frame(trends_window, bg=self.colors['bg_primary'])
+        main_container.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        
+        # Create figure with subplots and dark theme
         fig = plt.figure(figsize=(16, 12))
+        fig.patch.set_facecolor(self.colors['bg_primary'])
         gs = fig.add_gridspec(3, 2, hspace=0.3, wspace=0.3)
+        
+        # Color palette
+        colors = plt.cm.Set3(np.linspace(0, 1, len(self.processed_data['Hostname'].unique())))
         
         # 1. Moving Average Trends
         ax1 = fig.add_subplot(gs[0, :])
-        colors = plt.cm.Set3(np.linspace(0, 1, len(self.processed_data['Hostname'].unique())))
+        ax1.set_facecolor(self.colors['bg_secondary'])
         
         for i, hostname in enumerate(sorted(self.processed_data['Hostname'].unique())):
             host_data = self.processed_data[self.processed_data['Hostname'] == hostname].copy()
             host_data = host_data.sort_values('Time')
             
-            # Calculate moving averages
-            host_data['MA_5'] = host_data['CPU_Ready_Percent'].rolling(window=5, center=True).mean()
-            host_data['MA_10'] = host_data['CPU_Ready_Percent'].rolling(window=10, center=True).mean()
+            # Calculate moving averages with minimum window check
+            window_size = min(5, len(host_data))
+            if window_size >= 3:
+                host_data['MA_5'] = host_data['CPU_Ready_Percent'].rolling(window=window_size, center=True, min_periods=1).mean()
+            
+            window_size_10 = min(10, len(host_data))
+            if window_size_10 >= 3:
+                host_data['MA_10'] = host_data['CPU_Ready_Percent'].rolling(window=window_size_10, center=True, min_periods=1).mean()
             
             color = colors[i]
+            
+            # Plot raw data with transparency
             ax1.plot(host_data['Time'], host_data['CPU_Ready_Percent'], 
                     alpha=0.3, color=color, linewidth=1)
-            ax1.plot(host_data['Time'], host_data['MA_10'], 
-                    linewidth=2.5, label=f'{hostname}', color=color)
+            
+            # Plot moving average if available
+            if 'MA_10' in host_data.columns:
+                ax1.plot(host_data['Time'], host_data['MA_10'], 
+                        linewidth=2.5, label=f'{hostname}', color=color)
+            else:
+                ax1.plot(host_data['Time'], host_data['CPU_Ready_Percent'], 
+                        linewidth=2.5, label=f'{hostname}', color=color)
         
+        # Add threshold lines
         ax1.axhline(y=self.warning_threshold.get(), color='#f59e0b', 
-                   linestyle='--', alpha=0.8, label='Warning')
+                linestyle='--', alpha=0.8, label='Warning', linewidth=2)
         ax1.axhline(y=self.critical_threshold.get(), color='#ef4444', 
-                   linestyle='--', alpha=0.8, label='Critical')
+                linestyle='--', alpha=0.8, label='Critical', linewidth=2)
         
-        ax1.set_title('CPU Ready % Trends with Moving Averages', fontsize=14, fontweight='bold')
-        ax1.set_ylabel('CPU Ready %')
-        ax1.legend(bbox_to_anchor=(1.02, 1), loc='upper left')
-        ax1.grid(True, alpha=0.3)
+        # Style ax1
+        ax1.set_title('CPU Ready % Trends with Moving Averages', 
+                    fontsize=14, fontweight='bold', color=self.colors['text_primary'], pad=15)
+        ax1.set_ylabel('CPU Ready %', color=self.colors['text_primary'], fontsize=12)
+        ax1.tick_params(colors=self.colors['text_secondary'])
+        ax1.grid(True, alpha=0.3, color=self.colors['border'])
         
-        # 2. Distribution Analysis
+        # Format x-axis dates
+        ax1.tick_params(axis='x', rotation=45)
+        
+        # Legend
+        legend1 = ax1.legend(bbox_to_anchor=(1.02, 1), loc='upper left',
+                            frameon=True, fancybox=True, shadow=False,
+                            facecolor=self.colors['bg_tertiary'],
+                            edgecolor=self.colors['border'],
+                            labelcolor=self.colors['text_primary'])
+        
+        # Style spines
+        for spine in ax1.spines.values():
+            spine.set_color(self.colors['border'])
+        
+        # 2. Distribution Analysis - FIXED matplotlib deprecation
         ax2 = fig.add_subplot(gs[1, 0])
+        ax2.set_facecolor(self.colors['bg_secondary'])
+        
         all_values = []
         labels = []
         
         for hostname in sorted(self.processed_data['Hostname'].unique()):
             host_data = self.processed_data[self.processed_data['Hostname'] == hostname]
             all_values.append(host_data['CPU_Ready_Percent'].values)
-            labels.append(hostname)
+            labels.append(hostname[:10])  # Truncate long hostnames for display
         
-        bp = ax2.boxplot(all_values, labels=labels, patch_artist=True)
+        # FIXED: Use tick_labels instead of labels for matplotlib 3.9+
+        try:
+            bp = ax2.boxplot(all_values, tick_labels=labels, patch_artist=True)
+        except TypeError:
+            # Fallback for older matplotlib versions
+            bp = ax2.boxplot(all_values, labels=labels, patch_artist=True)
         
         # Color the boxes
         for patch, color in zip(bp['boxes'], colors):
             patch.set_facecolor(color)
             patch.set_alpha(0.7)
+            patch.set_edgecolor(self.colors['text_secondary'])
         
+        # Style whiskers, caps, medians, fliers
+        elements_to_style = ['whiskers', 'caps', 'medians', 'fliers']
+        for element in elements_to_style:
+            if element in bp:
+                for item in bp[element]:
+                    item.set_color(self.colors['text_secondary'])
+                    if element == 'medians':
+                        item.set_linewidth(2)
+        
+        # Add threshold lines
         ax2.axhline(y=self.warning_threshold.get(), color='#f59e0b', 
-                   linestyle='--', alpha=0.8)
+                linestyle='--', alpha=0.8, linewidth=2)
         ax2.axhline(y=self.critical_threshold.get(), color='#ef4444', 
-                   linestyle='--', alpha=0.8)
+                linestyle='--', alpha=0.8, linewidth=2)
         
-        ax2.set_title('CPU Ready % Distribution by Host', fontsize=12, fontweight='bold')
-        ax2.set_ylabel('CPU Ready %')
-        ax2.tick_params(axis='x', rotation=45)
-        ax2.grid(True, alpha=0.3)
+        ax2.set_title('CPU Ready % Distribution by Host', 
+                    fontsize=12, fontweight='bold', color=self.colors['text_primary'], pad=15)
+        ax2.set_ylabel('CPU Ready %', color=self.colors['text_primary'])
+        ax2.tick_params(axis='x', rotation=45, colors=self.colors['text_secondary'])
+        ax2.tick_params(axis='y', colors=self.colors['text_secondary'])
+        ax2.grid(True, alpha=0.3, color=self.colors['border'], axis='y')
+        
+        for spine in ax2.spines.values():
+            spine.set_color(self.colors['border'])
         
         # 3. Peak Analysis
         ax3 = fig.add_subplot(gs[1, 1])
+        ax3.set_facecolor(self.colors['bg_secondary'])
+        
         peak_data = []
         peak_hosts = []
+        peak_times = []
         
         for hostname in sorted(self.processed_data['Hostname'].unique()):
             host_data = self.processed_data[self.processed_data['Hostname'] == hostname]
-            top_peaks = host_data.nlargest(3, 'CPU_Ready_Percent')['CPU_Ready_Percent'].values
+            # Get top 3 peaks for each host
+            top_peaks = host_data.nlargest(3, 'CPU_Ready_Percent')
             
-            for peak in top_peaks:
-                peak_data.append(peak)
+            for _, peak_row in top_peaks.iterrows():
+                peak_data.append(peak_row['CPU_Ready_Percent'])
                 peak_hosts.append(hostname)
+                peak_times.append(peak_row['Time'])
         
-        scatter_colors = [colors[list(sorted(self.processed_data['Hostname'].unique())).index(host)] 
-                         for host in peak_hosts]
+        # Create scatter plot
+        if peak_data:
+            scatter_colors = [colors[list(sorted(self.processed_data['Hostname'].unique())).index(host)] 
+                            for host in peak_hosts]
+            
+            scatter = ax3.scatter(range(len(peak_data)), peak_data, 
+                                c=scatter_colors, s=80, alpha=0.7, 
+                                edgecolors=self.colors['border'], linewidth=1)
+            
+            # Add threshold lines
+            ax3.axhline(y=self.warning_threshold.get(), color='#f59e0b', 
+                    linestyle='--', alpha=0.8, label='Warning', linewidth=2)
+            ax3.axhline(y=self.critical_threshold.get(), color='#ef4444', 
+                    linestyle='--', alpha=0.8, label='Critical', linewidth=2)
+            
+            ax3.set_title('Performance Peaks Analysis (Top 3 per Host)', 
+                        fontsize=12, fontweight='bold', color=self.colors['text_primary'], pad=15)
+            ax3.set_ylabel('CPU Ready %', color=self.colors['text_primary'])
+            ax3.set_xlabel('Peak Instance', color=self.colors['text_primary'])
+            ax3.tick_params(colors=self.colors['text_secondary'])
+            ax3.grid(True, alpha=0.3, color=self.colors['border'])
+            
+            # Add legend for thresholds only
+            legend3 = ax3.legend(loc='upper left',
+                                frameon=True, fancybox=True, shadow=False,
+                                facecolor=self.colors['bg_tertiary'],
+                                edgecolor=self.colors['border'],
+                                labelcolor=self.colors['text_primary'])
+        else:
+            ax3.text(0.5, 0.5, 'No peak data available', 
+                    ha='center', va='center', transform=ax3.transAxes,
+                    color=self.colors['text_primary'], fontsize=12)
         
-        ax3.scatter(range(len(peak_data)), peak_data, c=scatter_colors, 
-                   s=100, alpha=0.7, edgecolors='black', linewidth=1)
-        
-        ax3.axhline(y=self.warning_threshold.get(), color='#f59e0b', 
-                   linestyle='--', alpha=0.8, label='Warning')
-        ax3.axhline(y=self.critical_threshold.get(), color='#ef4444', 
-                   linestyle='--', alpha=0.8, label='Critical')
-        
-        ax3.set_title('Performance Peaks Analysis', fontsize=12, fontweight='bold')
-        ax3.set_ylabel('CPU Ready %')
-        ax3.set_xlabel('Peak Instance')
-        ax3.legend()
-        ax3.grid(True, alpha=0.3)
+        for spine in ax3.spines.values():
+            spine.set_color(self.colors['border'])
         
         # 4. Time Pattern Analysis
         ax4 = fig.add_subplot(gs[2, :])
+        ax4.set_facecolor(self.colors['bg_secondary'])
         
+        # Check if we have enough data for hourly analysis
         if len(self.processed_data) > 24:
-            self.processed_data['Hour'] = self.processed_data['Time'].dt.hour
-            hourly_stats = self.processed_data.groupby(['Hour', 'Hostname'])['CPU_Ready_Percent'].agg(['mean', 'std']).reset_index()
-            
-            for i, hostname in enumerate(sorted(self.processed_data['Hostname'].unique())):
-                host_hourly = hourly_stats[hourly_stats['Hostname'] == hostname]
-                color = colors[i]
+            try:
+                # Add hour column
+                self.processed_data['Hour'] = self.processed_data['Time'].dt.hour
                 
-                ax4.plot(host_hourly['Hour'], host_hourly['mean'], 
-                        marker='o', linewidth=2, label=hostname, color=color)
-                ax4.fill_between(host_hourly['Hour'], 
-                               host_hourly['mean'] - host_hourly['std'],
-                               host_hourly['mean'] + host_hourly['std'],
-                               alpha=0.2, color=color)
-            
-            ax4.set_title('Average CPU Ready % by Hour (with Standard Deviation)', 
-                         fontsize=12, fontweight='bold')
-            ax4.set_xlabel('Hour of Day')
-            ax4.set_ylabel('CPU Ready %')
-            ax4.legend()
-            ax4.grid(True, alpha=0.3)
-            ax4.set_xticks(range(0, 24, 2))
+                # Group by hour and hostname
+                hourly_stats = self.processed_data.groupby(['Hour', 'Hostname'])['CPU_Ready_Percent'].agg(['mean', 'std']).reset_index()
+                
+                # Plot for each hostname
+                for i, hostname in enumerate(sorted(self.processed_data['Hostname'].unique())):
+                    host_hourly = hourly_stats[hourly_stats['Hostname'] == hostname]
+                    
+                    if len(host_hourly) > 0:
+                        color = colors[i]
+                        
+                        # Plot mean line
+                        ax4.plot(host_hourly['Hour'], host_hourly['mean'], 
+                                marker='o', linewidth=2.5, markersize=4,
+                                label=hostname, color=color)
+                        
+                        # Add standard deviation as fill_between (if std exists and is not NaN)
+                        if 'std' in host_hourly.columns and not host_hourly['std'].isna().all():
+                            std_values = host_hourly['std'].fillna(0)
+                            ax4.fill_between(host_hourly['Hour'], 
+                                            host_hourly['mean'] - std_values,
+                                            host_hourly['mean'] + std_values,
+                                            alpha=0.2, color=color)
+                
+                ax4.set_title('Average CPU Ready % by Hour of Day (with Standard Deviation)', 
+                            fontsize=12, fontweight='bold', color=self.colors['text_primary'], pad=15)
+                ax4.set_xlabel('Hour of Day (0-23)', color=self.colors['text_primary'])
+                ax4.set_ylabel('CPU Ready %', color=self.colors['text_primary'])
+                ax4.tick_params(colors=self.colors['text_secondary'])
+                ax4.grid(True, alpha=0.3, color=self.colors['border'])
+                ax4.set_xticks(range(0, 24, 2))
+                ax4.set_xlim(-0.5, 23.5)
+                
+                # Add threshold reference lines
+                ax4.axhline(y=self.warning_threshold.get(), color='#f59e0b', 
+                        linestyle='--', alpha=0.6, linewidth=1)
+                ax4.axhline(y=self.critical_threshold.get(), color='#ef4444', 
+                        linestyle='--', alpha=0.6, linewidth=1)
+                
+                legend4 = ax4.legend(loc='upper left',
+                                    frameon=True, fancybox=True, shadow=False,
+                                    facecolor=self.colors['bg_tertiary'],
+                                    edgecolor=self.colors['border'],
+                                    labelcolor=self.colors['text_primary'])
+                
+            except Exception as e:
+                print(f"DEBUG: Error in hourly analysis: {e}")
+                ax4.text(0.5, 0.5, f'Error creating hourly analysis:\n{str(e)}', 
+                        ha='center', va='center', transform=ax4.transAxes,
+                        color=self.colors['text_primary'], fontsize=12,
+                        bbox=dict(boxstyle='round', facecolor=self.colors['bg_tertiary'], 
+                                edgecolor=self.colors['border'], alpha=0.8))
         else:
-            ax4.text(0.5, 0.5, '📊 Insufficient data for hourly analysis\n\nNeed more data points to show patterns', 
+            ax4.text(0.5, 0.5, '📊 Insufficient data for hourly pattern analysis\n\n'
+                            f'Current data points: {len(self.processed_data)}\n'
+                            'Need at least 24 data points to show hourly patterns', 
                     ha='center', va='center', transform=ax4.transAxes, 
-                    fontsize=14, bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
-            ax4.set_title('Hourly Pattern Analysis', fontsize=12, fontweight='bold')
+                    fontsize=12, color=self.colors['text_primary'],
+                    bbox=dict(boxstyle='round', facecolor=self.colors['bg_tertiary'], 
+                            edgecolor=self.colors['border'], alpha=0.8))
+            ax4.set_title('Hourly Pattern Analysis', 
+                        fontsize=12, fontweight='bold', color=self.colors['text_primary'], pad=15)
         
-        # Embed in window
-        canvas = FigureCanvasTkAgg(fig, master=trends_window)
+        for spine in ax4.spines.values():
+            spine.set_color(self.colors['border'])
+        
+        # Adjust layout to prevent overlapping
+        plt.tight_layout(pad=2.0)
+        
+        # Embed in window with scrollable canvas if needed
+        canvas_frame = tk.Frame(main_container, bg=self.colors['bg_primary'])
+        canvas_frame.pack(fill=tk.BOTH, expand=True)
+        
+        canvas = FigureCanvasTkAgg(fig, master=canvas_frame)
         canvas.draw()
-        canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
-    
+        canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+        canvas.get_tk_widget().configure(bg=self.colors['bg_primary'])
+        
+        # Add summary statistics at the bottom
+        stats_frame = self.create_styled_frame(main_container, "📊 Trend Analysis Summary")
+        stats_frame.pack(fill=tk.X, pady=(10, 0))
+        
+        stats_content = tk.Frame(stats_frame, bg=self.colors['bg_primary'])
+        stats_content.pack(fill=tk.X, padx=10, pady=10)
+        
+        try:
+            # Calculate summary statistics
+            overall_mean = self.processed_data['CPU_Ready_Percent'].mean()
+            overall_std = self.processed_data['CPU_Ready_Percent'].std()
+            overall_max = self.processed_data['CPU_Ready_Percent'].max()
+            
+            # Calculate volatility (coefficient of variation)
+            volatility = (overall_std / overall_mean) * 100 if overall_mean > 0 else 0
+            
+            summary_text = (f"📈 Overall Average: {overall_mean:.2f}% | "
+                        f"📊 Standard Deviation: {overall_std:.2f}% | "
+                        f"⚡ Peak Value: {overall_max:.2f}% | "
+                        f"📉 Volatility: {volatility:.1f}%")
+            
+            summary_label = tk.Label(stats_content, text=summary_text,
+                                    bg=self.colors['bg_primary'],
+                                    fg=self.colors['text_primary'],
+                                    font=('Segoe UI', 10))
+            summary_label.pack(pady=5)
+            
+        except Exception as e:
+            print(f"DEBUG: Error calculating summary stats: {e}")
+
     def show_host_comparison(self):
-        """Show detailed host-by-host comparison"""
+        """Show detailed host-by-host comparison with consistent styling"""
         if self.processed_data is None:
             messagebox.showwarning("No Data", "Please calculate CPU Ready % first")
             return
         
-        # Create comparison window
-        comparison_window = tk.Toplevel(self.root)
-        comparison_window.title("🎯 Host Performance Comparison")
-        comparison_window.geometry("1200x700")
-        comparison_window.transient(self.root)
+        # Create styled comparison window
+        comparison_window = self.create_styled_popup_window("🎯 Host Performance Comparison", 1200, 700)
         
-        # Create main frame
-        main_frame = ttk.Frame(comparison_window)
-        main_frame.pack(fill=tk.BOTH, expand=True, padx=15, pady=15)
+        # Main container with dark background
+        main_container = tk.Frame(comparison_window, bg=self.colors['bg_primary'])
+        main_container.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
         
-        # Title
-        ttk.Label(main_frame, text="📊 Comprehensive Host Performance Analysis", 
-                 font=('Segoe UI', 14, 'bold')).pack(pady=(0, 15))
+        # Title with dark theme
+        title_label = tk.Label(main_container, 
+                            text="📊 Comprehensive Host Performance Analysis",
+                            bg=self.colors['bg_primary'],
+                            fg=self.colors['text_primary'],
+                            font=('Segoe UI', 14, 'bold'))
+        title_label.pack(pady=(0, 15))
+        
+        # Create comparison table frame
+        table_frame = self.create_styled_frame(main_container, "Performance Comparison")
+        table_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
+        
+        table_content = tk.Frame(table_frame, bg=self.colors['bg_primary'])
+        table_content.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
         
         # Create comparison table with modern styling
         columns = ('Rank', 'Host', 'Avg %', 'Max %', 'Min %', 'Std Dev', 'Health Score', 'Status', 'Recommendation')
-        tree_frame = ttk.Frame(main_frame)
-        tree_frame.pack(fill=tk.BOTH, expand=True)
-        
-        tree = ttk.Treeview(tree_frame, columns=columns, show='headings', height=15)
+        tree = ttk.Treeview(table_content, columns=columns, show='headings', height=15)
         
         # Configure columns
         tree.column('Rank', width=50)
@@ -2481,7 +3854,6 @@ Thresholds: Warning {warning_level}% | Critical {critical_level}%
         
         # Populate table
         for rank, data in enumerate(comparison_data, 1):
-            # Color coding based on status
             tree.insert('', 'end', values=(
                 f"#{rank}",
                 data['hostname'],
@@ -2495,37 +3867,48 @@ Thresholds: Warning {warning_level}% | Critical {critical_level}%
             ))
         
         # Scrollbars
-        v_scrollbar = ttk.Scrollbar(tree_frame, orient=tk.VERTICAL, command=tree.yview)
-        h_scrollbar = ttk.Scrollbar(tree_frame, orient=tk.HORIZONTAL, command=tree.xview)
+        v_scrollbar = ttk.Scrollbar(table_content, orient=tk.VERTICAL, command=tree.yview)
+        h_scrollbar = ttk.Scrollbar(table_content, orient=tk.HORIZONTAL, command=tree.xview)
         tree.configure(yscrollcommand=v_scrollbar.set, xscrollcommand=h_scrollbar.set)
         
         tree.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
         v_scrollbar.grid(row=0, column=1, sticky=(tk.N, tk.S))
         h_scrollbar.grid(row=1, column=0, sticky=(tk.W, tk.E))
         
-        tree_frame.columnconfigure(0, weight=1)
-        tree_frame.rowconfigure(0, weight=1)
+        table_content.columnconfigure(0, weight=1)
+        table_content.rowconfigure(0, weight=1)
         
-        # Summary statistics
-        summary_frame = ttk.LabelFrame(main_frame, text="📈 Summary Statistics", padding=10)
-        summary_frame.pack(fill=tk.X, pady=(15, 0))
+        # Summary statistics with styled frame
+        summary_frame = self.create_styled_frame(main_container, "📈 Summary Statistics")
+        summary_frame.pack(fill=tk.X, pady=(10, 0))
+        
+        summary_content = tk.Frame(summary_frame, bg=self.colors['bg_primary'])
+        summary_content.pack(fill=tk.X, padx=10, pady=10)
         
         critical_count = len([d for d in comparison_data if d['avg'] >= self.critical_threshold.get()])
         warning_count = len([d for d in comparison_data if self.warning_threshold.get() <= d['avg'] < self.critical_threshold.get()])
         healthy_count = len([d for d in comparison_data if d['avg'] < self.warning_threshold.get()])
         
         summary_text = (f"🔴 Critical Hosts: {critical_count} | "
-                       f"🟡 Warning Hosts: {warning_count} | "
-                       f"🟢 Healthy Hosts: {healthy_count} | "
-                       f"📊 Total Hosts: {len(comparison_data)}")
+                    f"🟡 Warning Hosts: {warning_count} | "
+                    f"🟢 Healthy Hosts: {healthy_count} | "
+                    f"📊 Total Hosts: {len(comparison_data)}")
         
-        ttk.Label(summary_frame, text=summary_text, font=('Segoe UI', 10)).pack()
+        summary_label = tk.Label(summary_content, text=summary_text,
+                                bg=self.colors['bg_primary'],
+                                fg=self.colors['text_primary'],
+                                font=('Segoe UI', 10))
+        summary_label.pack()
         
-        # Export button
-        ttk.Button(main_frame, text="📋 Export Comparison Report", 
-                  command=lambda: self.export_comparison_report(comparison_data),
-                  style='Primary.TButton').pack(pady=(10, 0))
-    
+        # Export button with consistent styling
+        export_btn = tk.Button(main_container, text="📋 Export Comparison Report",
+                            command=lambda: self.export_comparison_report(comparison_data),
+                            bg=self.colors['accent_blue'], fg='white',
+                            font=('Segoe UI', 9, 'bold'),
+                            relief='flat', borderwidth=0,
+                            padx=15, pady=8)
+        export_btn.pack(pady=(10, 0))
+  
     def export_comparison_report(self, comparison_data):
         """Export detailed comparison report"""
         filename = filedialog.asksaveasfilename(
@@ -2624,6 +4007,281 @@ Thresholds: Warning {warning_level}% | Critical {critical_level}%
             import sys
             sys.exit(0)
 
+    def create_about_tab(self):
+        """Create scrollable about tab with application and developer information"""
+        tab_frame = tk.Frame(self.notebook, bg=self.colors['bg_primary'])
+        self.notebook.add(tab_frame, text="ℹ️ About")
+        
+        # Configure the main frame to expand properly
+        tab_frame.columnconfigure(0, weight=1)
+        tab_frame.rowconfigure(0, weight=1)
+        
+        # Create canvas and scrollbar for scrolling
+        canvas = tk.Canvas(tab_frame, bg=self.colors['bg_primary'], highlightthickness=0)
+        scrollbar = ttk.Scrollbar(tab_frame, orient="vertical", command=canvas.yview)
+        scrollable_frame = tk.Frame(canvas, bg=self.colors['bg_primary'])
+        
+        # Configure scrolling
+        scrollable_frame.bind(
+            "<Configure>",
+            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+        )
+        
+        canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+        
+        # Pack canvas and scrollbar
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+        
+        # Main content container
+        main_container = tk.Frame(scrollable_frame, bg=self.colors['bg_primary'])
+        main_container.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
+        main_container.columnconfigure(0, weight=1)
+        
+        # Header Section
+        header_frame = tk.Frame(main_container, bg=self.colors['bg_primary'])
+        header_frame.pack(fill=tk.X, pady=(0, 20))
+        
+        # App icon and title
+        title_label = tk.Label(header_frame, 
+                            text="🖥️ vCenter CPU Ready Analyzer",
+                            bg=self.colors['bg_primary'],
+                            fg=self.colors['text_primary'],
+                            font=('Segoe UI', 20, 'bold'))
+        title_label.pack(pady=(0, 5))
+        
+        version_label = tk.Label(header_frame,
+                            text="Version 2.0",
+                            bg=self.colors['bg_primary'],
+                            fg=self.colors['text_secondary'],
+                            font=('Segoe UI', 12))
+        version_label.pack(pady=(0, 10))
+        
+        description_label = tk.Label(header_frame,
+                                    text="Advanced CPU Ready metrics analysis and host consolidation optimization tool",
+                                    bg=self.colors['bg_primary'],
+                                    fg=self.colors['text_secondary'],
+                                    font=('Segoe UI', 11),
+                                    wraplength=600)
+        description_label.pack()
+        
+        # Developer Information Card
+        dev_section = tk.LabelFrame(main_container, text="  👨‍💻 Development Team  ",
+                                bg=self.colors['bg_primary'],
+                                fg=self.colors['accent_blue'],
+                                font=('Segoe UI', 12, 'bold'),
+                                borderwidth=1,
+                                relief='solid')
+        dev_section.pack(fill=tk.X, pady=(0, 15))
+        
+        dev_content = tk.Frame(dev_section, bg=self.colors['bg_primary'])
+        dev_content.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
+        
+        # Developer details
+        chief_label = tk.Label(dev_content,
+                            text="Chief Architect & Developer",
+                            bg=self.colors['bg_primary'],
+                            fg=self.colors['accent_blue'],
+                            font=('Segoe UI', 11, 'bold'))
+        chief_label.pack(anchor=tk.W, pady=(0, 5))
+        
+        name_label = tk.Label(dev_content,
+                            text="Joshua Fourie",
+                            bg=self.colors['bg_primary'],
+                            fg=self.colors['text_primary'],
+                            font=('Segoe UI', 14, 'bold'))
+        name_label.pack(anchor=tk.W, pady=(0, 10))
+        
+        # Contact info
+        contact_frame = tk.Frame(dev_content, bg=self.colors['bg_primary'])
+        contact_frame.pack(fill=tk.X, pady=(0, 15))
+        
+        email_icon = tk.Label(contact_frame,
+                            text="📧",
+                            bg=self.colors['bg_primary'],
+                            fg=self.colors['text_primary'],
+                            font=('Segoe UI', 12))
+        email_icon.pack(side=tk.LEFT, padx=(0, 8))
+        
+        email_label = tk.Label(contact_frame,
+                            text="joshua.fourie@outlook.com",
+                            bg=self.colors['bg_primary'],
+                            fg=self.colors['accent_blue'],
+                            font=('Segoe UI', 11),
+                            cursor='hand2')
+        email_label.pack(side=tk.LEFT)
+        
+        # Make email clickable
+        def open_email(event):
+            import webbrowser
+            webbrowser.open(f"mailto:joshua.fourie@outlook.com")
+        
+        email_label.bind("<Button-1>", open_email)
+        email_label.bind("<Enter>", lambda e: email_label.config(fg=self.colors['accent_hover']))
+        email_label.bind("<Leave>", lambda e: email_label.config(fg=self.colors['accent_blue']))
+        
+        # Expertise
+        expertise_label = tk.Label(dev_content,
+                                text="Expertise:",
+                                bg=self.colors['bg_primary'],
+                                fg=self.colors['text_secondary'],
+                                font=('Segoe UI', 10, 'bold'))
+        expertise_label.pack(anchor=tk.W, pady=(10, 5))
+        
+        expertise_text = """• VMware vCenter & vSphere Infrastructure
+    • Performance Analytics & Monitoring
+    • Host Consolidation & Capacity Planning
+    • Python Development & Data Analysis
+    • Enterprise Virtualization Solutions"""
+        
+        expertise_content = tk.Label(dev_content,
+                                    text=expertise_text,
+                                    bg=self.colors['bg_primary'],
+                                    fg=self.colors['text_primary'],
+                                    font=('Segoe UI', 10),
+                                    justify=tk.LEFT)
+        expertise_content.pack(anchor=tk.W)
+        
+        # Application Features Card
+        features_section = tk.LabelFrame(main_container, text="  ⭐ Key Features  ",
+                                        bg=self.colors['bg_primary'],
+                                        fg=self.colors['accent_blue'],
+                                        font=('Segoe UI', 12, 'bold'),
+                                        borderwidth=1,
+                                        relief='solid')
+        features_section.pack(fill=tk.X, pady=(0, 15))
+        
+        features_content = tk.Frame(features_section, bg=self.colors['bg_primary'])
+        features_content.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
+        
+        features_text = """🔗 Direct vCenter Integration
+    • Live performance data fetching
+    • Real-time and historical analysis
+    • Support for multiple time periods
+
+    📊 Advanced Analytics
+    • CPU Ready percentage calculations
+    • Health scoring algorithms
+    • Performance trend analysis
+    • Statistical distribution analysis
+
+    📈 Visual Reporting
+    • Interactive timeline charts
+    • Heat map calendar views
+    • Host comparison matrices
+    • Export capabilities
+
+    🎯 Consolidation Analysis
+    • Host removal impact assessment
+    • Workload redistribution modeling
+    • Risk analysis and recommendations
+    • Infrastructure optimization
+
+    🏥 Health Monitoring
+    • Automated threshold detection
+    • Performance alerting
+    • Comprehensive dashboards
+    • Executive reporting"""
+        
+        features_label = tk.Label(features_content,
+                                text=features_text,
+                                bg=self.colors['bg_primary'],
+                                fg=self.colors['text_primary'],
+                                font=('Segoe UI', 10),
+                                justify=tk.LEFT)
+        features_label.pack(anchor=tk.W)
+        
+        # Technology Stack Card
+        tech_section = tk.LabelFrame(main_container, text="  🛠️ Technology Stack  ",
+                                    bg=self.colors['bg_primary'],
+                                    fg=self.colors['accent_blue'],
+                                    font=('Segoe UI', 12, 'bold'),
+                                    borderwidth=1,
+                                    relief='solid')
+        tech_section.pack(fill=tk.X, pady=(0, 15))
+        
+        tech_content = tk.Frame(tech_section, bg=self.colors['bg_primary'])
+        tech_content.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
+        
+        tech_text = """🐍 Python 3.x
+    📊 Pandas & NumPy (Data Analysis)
+    📈 Matplotlib & Seaborn (Visualisation)
+    🖥️ Tkinter (Modern UI Framework)
+    🔗 PyVmomi (vCenter API Integration)
+    📡 Requests (HTTP Communications)
+    🎨 Custom Dark Theme Implementation"""
+        
+        tech_label = tk.Label(tech_content,
+                            text=tech_text,
+                            bg=self.colors['bg_primary'],
+                            fg=self.colors['text_primary'],
+                            font=('Segoe UI', 10),
+                            justify=tk.LEFT)
+        tech_label.pack(anchor=tk.W)
+        
+        # License & Copyright Card
+        license_section = tk.LabelFrame(main_container, text="  📄 License & Copyright  ",
+                                    bg=self.colors['bg_primary'],
+                                    fg=self.colors['accent_blue'],
+                                    font=('Segoe UI', 12, 'bold'),
+                                    borderwidth=1,
+                                    relief='solid')
+        license_section.pack(fill=tk.X, pady=(0, 15))
+        
+        license_content = tk.Frame(license_section, bg=self.colors['bg_primary'])
+        license_content.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
+        
+        copyright_text = f"""© {datetime.now().year} Joshua Fourie
+    All Rights Reserved
+
+    This application is proprietary software
+    developed for enterprise infrastructure
+    analysis and optimization.
+
+    Built with ❤️ for the VMware community"""
+        
+        copyright_label = tk.Label(license_content,
+                                text=copyright_text,
+                                bg=self.colors['bg_primary'],
+                                fg=self.colors['text_primary'],
+                                font=('Segoe UI', 10),
+                                justify=tk.CENTER)
+        copyright_label.pack(expand=True)
+        
+        # Footer
+        footer_frame = tk.Frame(main_container, bg=self.colors['bg_primary'])
+        footer_frame.pack(fill=tk.X, pady=(20, 0))
+        
+        footer_label = tk.Label(footer_frame,
+                            text="🚀 Empowering infrastructure teams with intelligent performance insights",
+                            bg=self.colors['bg_primary'],
+                            fg=self.colors['text_secondary'],
+                            font=('Segoe UI', 11, 'italic'),
+                            wraplength=600)
+        footer_label.pack()
+        
+        # Mouse wheel scrolling support
+        def _on_mousewheel(event):
+            canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+        
+        # Bind mouse wheel to canvas and all child widgets
+        def bind_to_mousewheel(widget):
+            widget.bind("<MouseWheel>", _on_mousewheel)
+            for child in widget.winfo_children():
+                bind_to_mousewheel(child)
+        
+        bind_to_mousewheel(scrollable_frame)
+        canvas.bind("<MouseWheel>", _on_mousewheel)
+        
+        # Update scroll region when window is resized
+        def configure_scroll_region(event=None):
+            canvas.configure(scrollregion=canvas.bbox("all"))
+            # Update the scrollable frame width to match canvas
+            canvas_width = canvas.winfo_width()
+            canvas.itemconfig(canvas.find_all()[0], width=canvas_width)
+        
+        canvas.bind('<Configure>', configure_scroll_region)
 
 def main():
     """Main application entry point"""
