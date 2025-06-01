@@ -27,7 +27,7 @@ try:
     PDF_AVAILABLE = True
 except ImportError:
     PDF_AVAILABLE = False
-
+from realtime_dashboard import RealTimeDashboard
 # vCenter integration imports
 try:
     from pyVim.connect import SmartConnect, Disconnect
@@ -61,7 +61,6 @@ class ModernCPUAnalyzer:
         
         # Update intervals
         self.intervals = {
-            "Real-Time": 20,
             "Last Day": 300,
             "Last Week": 1800,
             "Last Month": 7200,
@@ -69,7 +68,6 @@ class ModernCPUAnalyzer:
         }
         
         self.vcenter_intervals = {
-            "Real-Time": 20,
             "Last Day": 300,
             "Last Week": 1800,
             "Last Month": 7200,
@@ -88,6 +86,8 @@ class ModernCPUAnalyzer:
         
         # NOW setup the UI (this will access the auto-flow variables)
         self.setup_modern_ui()
+        
+        self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
 
     def create_auto_flow_controls(self, parent):
         """Add auto-flow controls to Data Source tab"""
@@ -404,6 +404,7 @@ class ModernCPUAnalyzer:
         
         # Visualisation Tab
         self.create_visualization_tab()
+        self.create_realtime_dashboard_tab()
         
         # Host Management Tab
         self.create_host_management_tab()
@@ -413,6 +414,20 @@ class ModernCPUAnalyzer:
         
         # About Tab
         self.create_about_tab()
+
+    def create_realtime_dashboard_tab(self):
+        """Create real-time dashboard tab"""
+        tab_frame = tk.Frame(self.notebook, bg=self.colors['bg_primary'])
+        self.notebook.add(tab_frame, text="📡 Real-Time Dashboard")
+        
+        # Initialize dashboard with your theme colors and thresholds
+        self.realtime_dashboard = RealTimeDashboard(
+            parent=tab_frame,
+            vcenter_connection=getattr(self, 'vcenter_connection', None),
+            warning_threshold=self.warning_threshold.get() if hasattr(self, 'warning_threshold') else 5.0,
+            critical_threshold=self.critical_threshold.get() if hasattr(self, 'critical_threshold') else 15.0,
+            theme_colors=self.colors
+        )
 
     def create_status_bar(self, parent):
         """Create modern status bar - FIXED for pack"""
@@ -527,7 +542,7 @@ class ModernCPUAnalyzer:
         self.preview_tree.configure(yscrollcommand=v_scrollbar.set, xscrollcommand=h_scrollbar.set)
 
     def export_comprehensive_pdf_report(self):
-        """Export comprehensive PDF report with all analysis results"""
+        """Export comprehensive PDF report with all analysis results, visualizations, and AI recommendations"""
         if not PDF_AVAILABLE:
             messagebox.showerror("PDF Export Unavailable", 
                             "PDF export requires additional packages:\n\n"
@@ -549,7 +564,7 @@ class ModernCPUAnalyzer:
         if not filename:
             return
         
-        self.show_progress("Generating comprehensive PDF report...")
+        self.show_progress("Generating comprehensive PDF report with visualizations...")
         
         try:
             # Create PDF document
@@ -589,11 +604,11 @@ class ModernCPUAnalyzer:
             # Build story (content)
             story = []
             
-            # Title Page
+            # TITLE PAGE
             story.append(Paragraph("🖥️ vCenter CPU Ready Analysis Report", title_style))
             story.append(Spacer(1, 0.5*inch))
             
-            # Executive Summary Box
+            # Executive Summary
             exec_summary = self.generate_executive_summary()
             story.append(Paragraph("📊 Executive Summary", heading_style))
             
@@ -625,152 +640,208 @@ class ModernCPUAnalyzer:
             story.append(Spacer(1, 0.3*inch))
             
             # Key Findings
-            story.append(Paragraph("🎯 Key Findings", heading_style))
+            story.append(Paragraph("🎯 Key Findings", subheading_style))
             findings = exec_summary['key_findings']
             for finding in findings:
                 story.append(Paragraph(f"• {finding}", styles['Normal']))
             story.append(Spacer(1, 0.2*inch))
             
-            # Page break before detailed analysis
+            # Page break before main content
             story.append(PageBreak())
             
-            # Detailed Host Analysis
-            story.append(Paragraph("📈 Detailed Host Performance Analysis", heading_style))
+            # SECTION 1: PERFORMANCE TIMELINE VISUALIZATION
+            story.append(Paragraph("📈 Performance Timeline Analysis", heading_style))
+            
+            # Generate and include main timeline chart
+            timeline_chart = self.generate_timeline_chart_for_pdf()
+            if timeline_chart:
+                story.append(timeline_chart)
+                story.append(Spacer(1, 0.2*inch))
+            
+            # Timeline analysis text
+            timeline_analysis = self.generate_timeline_analysis_text()
+            story.append(Paragraph(timeline_analysis, styles['Normal']))
+            story.append(Spacer(1, 0.3*inch))
+            
+            # SECTION 2: DETAILED HOST ANALYSIS TABLE
+            story.append(Paragraph("📊 Detailed Host Performance Analysis", heading_style))
             
             # Create detailed host table
             host_data = []
-            host_data.append(["Host", "Avg CPU Ready %", "Max CPU Ready %", "Health Score", "Status", "Records"])
+            host_data.append(["Host", "Avg CPU Ready %", "Max CPU Ready %", "Min CPU Ready %", "Health Score", "Status", "Records"])
+            
+            host_analysis_details = []
             
             for hostname in sorted(self.processed_data['Hostname'].unique()):
                 host_df = self.processed_data[self.processed_data['Hostname'] == hostname]
                 avg_cpu = host_df['CPU_Ready_Percent'].mean()
                 max_cpu = host_df['CPU_Ready_Percent'].max()
-                health_score = self.calculate_health_score(avg_cpu, max_cpu, host_df['CPU_Ready_Percent'].std())
+                min_cpu = host_df['CPU_Ready_Percent'].min()
+                std_cpu = host_df['CPU_Ready_Percent'].std()
+                health_score = self.calculate_health_score(avg_cpu, max_cpu, std_cpu)
                 
                 if avg_cpu >= self.critical_threshold.get():
                     status = "Critical"
-                    status_color = colors.red
                 elif avg_cpu >= self.warning_threshold.get():
                     status = "Warning"
-                    status_color = colors.orange
                 else:
                     status = "Healthy"
-                    status_color = colors.green
                 
                 host_data.append([
                     hostname,
                     f"{avg_cpu:.2f}%",
                     f"{max_cpu:.2f}%",
+                    f"{min_cpu:.2f}%",
                     f"{health_score:.0f}/100",
                     status,
                     f"{len(host_df):,}"
                 ])
+                
+                # Store detailed analysis for later
+                host_analysis_details.append({
+                    'hostname': hostname,
+                    'avg_cpu': avg_cpu,
+                    'max_cpu': max_cpu,
+                    'min_cpu': min_cpu,
+                    'std_cpu': std_cpu,
+                    'health_score': health_score,
+                    'status': status,
+                    'records': len(host_df)
+                })
             
-            host_table = Table(host_data, colWidths=[1.8*inch, 1*inch, 1*inch, 1*inch, 0.8*inch, 0.8*inch])
+            # Create and style the host table
+            host_table = Table(host_data, colWidths=[1.3*inch, 0.8*inch, 0.8*inch, 0.8*inch, 0.8*inch, 0.7*inch, 0.7*inch])
             host_table.setStyle(TableStyle([
                 ('BACKGROUND', (0, 0), (-1, 0), colors.darkblue),
                 ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
                 ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
                 ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-                ('FONTSIZE', (0, 0), (-1, 0), 10),
+                ('FONTSIZE', (0, 0), (-1, 0), 9),
                 ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
                 ('BACKGROUND', (0, 1), (-1, -1), colors.beige),
                 ('GRID', (0, 0), (-1, -1), 1, colors.black),
-                ('FONTSIZE', (0, 1), (-1, -1), 9)
+                ('FONTSIZE', (0, 1), (-1, -1), 8)
             ]))
-            
-            # Add conditional formatting for status
-            for i, row in enumerate(host_data[1:], 1):
-                if "Critical" in row[4]:
-                    host_table.setStyle(TableStyle([('TEXTCOLOR', (4, i), (4, i), colors.red)]))
-                elif "Warning" in row[4]:
-                    host_table.setStyle(TableStyle([('TEXTCOLOR', (4, i), (4, i), colors.orange)]))
-                else:
-                    host_table.setStyle(TableStyle([('TEXTCOLOR', (4, i), (4, i), colors.green)]))
             
             story.append(host_table)
             story.append(Spacer(1, 0.3*inch))
             
-            # Performance Statistics
-            story.append(Paragraph("📊 Performance Statistics", subheading_style))
-            
-            overall_avg = self.processed_data['CPU_Ready_Percent'].mean()
-            overall_max = self.processed_data['CPU_Ready_Percent'].max()
-            overall_min = self.processed_data['CPU_Ready_Percent'].min()
-            overall_std = self.processed_data['CPU_Ready_Percent'].std()
-            
-            stats_text = f"""
-            <b>Overall Performance Metrics:</b><br/>
-            • Average CPU Ready: {overall_avg:.2f}%<br/>
-            • Maximum CPU Ready: {overall_max:.2f}%<br/>
-            • Minimum CPU Ready: {overall_min:.2f}%<br/>
-            • Standard Deviation: {overall_std:.2f}%<br/>
-            • Coefficient of Variation: {(overall_std/overall_avg)*100:.1f}%<br/>
-            <br/>
-            <b>Threshold Analysis:</b><br/>
-            • Warning Threshold: {self.warning_threshold.get()}%<br/>
-            • Critical Threshold: {self.critical_threshold.get()}%<br/>
-            • Hosts exceeding warning: {len([h for h in self.processed_data['Hostname'].unique() if self.processed_data[self.processed_data['Hostname']==h]['CPU_Ready_Percent'].mean() >= self.warning_threshold.get()])}<br/>
-            • Hosts exceeding critical: {len([h for h in self.processed_data['Hostname'].unique() if self.processed_data[self.processed_data['Hostname']==h]['CPU_Ready_Percent'].mean() >= self.critical_threshold.get()])}
-            """
-            story.append(Paragraph(stats_text, styles['Normal']))
-            story.append(Spacer(1, 0.3*inch))
-            
-            # Add chart if available
-            story.append(Paragraph("📈 Performance Timeline Chart", subheading_style))
-            chart_image = self.generate_chart_for_pdf()
-            if chart_image:
-                story.append(chart_image)
-                story.append(Spacer(1, 0.2*inch))
-            
-            # Page break before recommendations
+            # SECTION 3: AI CONSOLIDATION RECOMMENDATIONS
             story.append(PageBreak())
+            story.append(Paragraph("🤖 AI Consolidation Recommendations", heading_style))
             
-            # Add AI Recommendations if available
+            # Generate AI recommendations if not already done
+            if not hasattr(self, 'current_recommendations') or not self.current_recommendations:
+                # Generate recommendations for PDF
+                strategy = "Balanced"
+                target_reduction = 20.0
+                recommendations = self.analyze_consolidation_candidates(strategy, target_reduction)
+                self.current_recommendations = recommendations
+            
             if hasattr(self, 'current_recommendations') and self.current_recommendations:
-                story.append(Paragraph("🤖 AI Consolidation Recommendations", heading_style))
+                # AI Recommendations Summary Table
+                story.append(Paragraph("🎯 Recommended Hosts for Consolidation", subheading_style))
                 
-                rec_data = [["Rank", "Host", "Score", "Risk Level", "Avg CPU Ready %"]]
-                for i, rec in enumerate(self.current_recommendations[:5], 1):  # Top 5
-                    risk_level = "Low" if rec['metrics']['avg_cpu_ready'] < 2.0 else "Medium" if rec['metrics']['avg_cpu_ready'] < 5.0 else "High"
+                rec_data = [["Rank", "Host", "Consolidation Score", "Risk Level", "Avg CPU Ready %", "Peak CPU Ready %"]]
+                
+                for i, rec in enumerate(self.current_recommendations[:5], 1):  # Top 5 recommendations
+                    if rec['metrics']['avg_cpu_ready'] < 2.0 and rec['metrics']['critical_periods'] == 0:
+                        risk_level = "Low"
+                        risk_color = colors.green
+                    elif rec['metrics']['avg_cpu_ready'] < 5.0 and rec['metrics']['critical_periods'] < 2:
+                        risk_level = "Medium"
+                        risk_color = colors.orange
+                    else:
+                        risk_level = "High"
+                        risk_color = colors.red
+                    
                     rec_data.append([
                         str(i),
                         rec['hostname'],
                         f"{rec['consolidation_score']:.0f}/100",
                         risk_level,
-                        f"{rec['metrics']['avg_cpu_ready']:.2f}%"
+                        f"{rec['metrics']['avg_cpu_ready']:.2f}%",
+                        f"{rec['metrics']['percentile_95']:.2f}%"
                     ])
                 
-                rec_table = Table(rec_data, colWidths=[0.5*inch, 2*inch, 1*inch, 1*inch, 1.2*inch])
+                rec_table = Table(rec_data, colWidths=[0.4*inch, 1.5*inch, 1*inch, 0.8*inch, 1*inch, 1*inch])
                 rec_table.setStyle(TableStyle([
                     ('BACKGROUND', (0, 0), (-1, 0), colors.darkgreen),
                     ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
                     ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
                     ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-                    ('FONTSIZE', (0, 0), (-1, 0), 10),
+                    ('FONTSIZE', (0, 0), (-1, 0), 9),
                     ('BACKGROUND', (0, 1), (-1, -1), colors.lightgreen),
-                    ('GRID', (0, 0), (-1, -1), 1, colors.black)
+                    ('GRID', (0, 0), (-1, -1), 1, colors.black),
+                    ('FONTSIZE', (0, 1), (-1, -1), 8)
                 ]))
                 story.append(rec_table)
                 story.append(Spacer(1, 0.3*inch))
+                
+                # Detailed AI Analysis Text
+                ai_analysis_text = self.generate_ai_recommendations_text()
+                story.append(Paragraph(ai_analysis_text, styles['Normal']))
+                story.append(Spacer(1, 0.3*inch))
+                
+                # Impact Assessment
+                story.append(Paragraph("📊 Consolidation Impact Assessment", subheading_style))
+                impact_text = self.generate_consolidation_impact_text()
+                story.append(Paragraph(impact_text, styles['Normal']))
+                story.append(Spacer(1, 0.3*inch))
             
-            # Recommendations and Best Practices
-            story.append(Paragraph("💡 Recommendations & Best Practices", heading_style))
+            else:
+                story.append(Paragraph("No AI recommendations generated. Run AI analysis first for consolidation recommendations.", styles['Normal']))
+                story.append(Spacer(1, 0.3*inch))
             
-            recommendations_text = """
-            <b>Infrastructure Optimization Recommendations:</b><br/>
-            • Monitor hosts with CPU Ready > 5% for potential resource contention<br/>
-            • Consider consolidating hosts with consistently low CPU Ready values<br/>
-            • Implement DRS rules for balanced workload distribution<br/>
-            • Regular performance monitoring and capacity planning<br/>
+            # SECTION 4: ADVANCED VISUALIZATIONS
+            story.append(PageBreak())
+            story.append(Paragraph("📊 Advanced Performance Analysis", heading_style))
+            
+            # Host Comparison Chart
+            story.append(Paragraph("🎯 Host Performance Comparison", subheading_style))
+            comparison_chart = self.generate_host_comparison_chart_for_pdf()
+            if comparison_chart:
+                story.append(comparison_chart)
+                story.append(Spacer(1, 0.2*inch))
+            
+            # Performance Distribution Analysis
+            story.append(Paragraph("📈 Performance Distribution Analysis", subheading_style))
+            distribution_text = self.generate_distribution_analysis_text()
+            story.append(Paragraph(distribution_text, styles['Normal']))
+            story.append(Spacer(1, 0.3*inch))
+            
+            # SECTION 5: RECOMMENDATIONS AND BEST PRACTICES
+            story.append(PageBreak())
+            story.append(Paragraph("💡 Recommendations & Implementation Guide", heading_style))
+            
+            # Implementation recommendations
+            story.append(Paragraph("🚀 Implementation Recommendations", subheading_style))
+            impl_recommendations = self.generate_implementation_recommendations()
+            story.append(Paragraph(impl_recommendations, styles['Normal']))
+            story.append(Spacer(1, 0.3*inch))
+            
+            # Best practices
+            story.append(Paragraph("✅ Best Practices", subheading_style))
+            best_practices_text = """
+            <b>Performance Monitoring:</b><br/>
+            • Monitor CPU Ready metrics continuously<br/>
+            • Set up automated alerting for thresholds<br/>
+            • Regular capacity planning reviews<br/>
+            • Document all performance baselines<br/>
             <br/>
-            <b>Best Practices:</b><br/>
-            • Maintain CPU Ready below 5% for optimal performance<br/>
-            • Plan for peak usage periods and growth<br/>
-            • Regular health assessments and threshold reviews<br/>
-            • Document all infrastructure changes and optimizations
+            <b>Consolidation Guidelines:</b><br/>
+            • Test consolidation in non-production first<br/>
+            • Implement changes during maintenance windows<br/>
+            • Monitor performance for 2 weeks post-consolidation<br/>
+            • Maintain rollback procedures<br/>
+            <br/>
+            <b>Infrastructure Management:</b><br/>
+            • Regular health assessments using this tool<br/>
+            • Update DRS/HA configurations after changes<br/>
+            • Keep documentation current<br/>
+            • Train team on performance optimization
             """
-            story.append(Paragraph(recommendations_text, styles['Normal']))
+            story.append(Paragraph(best_practices_text, styles['Normal']))
             story.append(Spacer(1, 0.3*inch))
             
             # Footer information
@@ -779,6 +850,8 @@ class ModernCPUAnalyzer:
             <b>Generated by:</b> vCenter CPU Ready Analyzer v2.0<br/>
             <b>Report Generated:</b> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}<br/>
             <b>Analysis Method:</b> VMware vCenter Performance Data Analysis<br/>
+            <b>Total Pages:</b> Multiple sections with visualizations<br/>
+            <b>Data Period:</b> {self.current_interval}<br/>
             <b>Developed by:</b> Joshua Fourie (joshua.fourie@outlook.com)
             """
             story.append(Paragraph(footer_text, styles['Normal']))
@@ -788,14 +861,321 @@ class ModernCPUAnalyzer:
             
             messagebox.showinfo("PDF Export Complete", 
                             f"Comprehensive PDF report exported successfully!\n\n"
-                            f"Location: {filename}\n"
-                            f"Pages: Multiple\n"
-                            f"Content: Complete analysis with charts and recommendations")
+                            f"📄 Location: {filename}\n"
+                            f"📊 Content: Complete analysis with charts, visualizations, and AI recommendations\n"
+                            f"📈 Includes: Timeline charts, host comparison, and consolidation analysis")
             
         except Exception as e:
             messagebox.showerror("PDF Export Error", f"Failed to generate PDF report:\n{str(e)}")
+            import traceback
+            print(f"PDF Export Error Details: {traceback.format_exc()}")
         finally:
             self.hide_progress()
+
+    def generate_timeline_chart_for_pdf(self):
+        """Generate timeline chart specifically for PDF inclusion"""
+        try:
+            import tempfile
+            import os
+            
+            # Create a copy of the current figure for PDF
+            fig_copy, ax_copy = plt.subplots(figsize=(10, 6))
+            fig_copy.patch.set_facecolor('white')
+            ax_copy.set_facecolor('white')
+            
+            # Modern color palette for PDF (darker colors for better printing)
+            colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2', '#7f7f7f']
+            
+            hostnames = sorted(self.processed_data['Hostname'].unique())
+            
+            for i, hostname in enumerate(hostnames):
+                host_data = self.processed_data[self.processed_data['Hostname'] == hostname].copy()
+                host_data = host_data.sort_values('Time')
+                
+                color = colors[i % len(colors)]
+                ax_copy.plot(host_data['Time'], host_data['CPU_Ready_Percent'],
+                            marker='o', markersize=2, linewidth=2, label=hostname,
+                            color=color, alpha=0.8)
+            
+            # Add threshold lines
+            warning_line = self.warning_threshold.get()
+            critical_line = self.critical_threshold.get()
+            
+            ax_copy.axhline(y=warning_line, color='orange', linestyle='--', 
+                        alpha=0.7, linewidth=2, label=f'Warning ({warning_line}%)')
+            ax_copy.axhline(y=critical_line, color='red', linestyle='--', 
+                        alpha=0.7, linewidth=2, label=f'Critical ({critical_line}%)')
+            
+            # Styling for PDF
+            ax_copy.set_title(f'CPU Ready % Timeline ({self.current_interval} Interval)', 
+                            fontsize=14, fontweight='bold', color='black', pad=15)
+            ax_copy.set_xlabel('Time', fontsize=12, color='black')
+            ax_copy.set_ylabel('CPU Ready %', fontsize=12, color='black')
+            
+            # Legend
+            ax_copy.legend(loc='upper left', bbox_to_anchor=(1.02, 1),
+                        frameon=True, fancybox=True)
+            
+            # Grid
+            ax_copy.grid(True, alpha=0.3, linestyle='-', linewidth=0.5)
+            
+            # Format dates on x-axis
+            fig_copy.autofmt_xdate()
+            fig_copy.tight_layout()
+            
+            # Save to temporary file
+            with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp_file:
+                fig_copy.savefig(tmp_file.name, dpi=150, bbox_inches='tight', 
+                            facecolor='white', edgecolor='none')
+                
+                # Create reportlab Image
+                from reportlab.platypus import Image
+                chart_img = Image(tmp_file.name, width=7*inch, height=4*inch)
+                
+                # Clean up
+                plt.close(fig_copy)
+                os.unlink(tmp_file.name)
+                
+                return chart_img
+        except Exception as e:
+            print(f"DEBUG: Could not generate timeline chart for PDF: {e}")
+            return None
+
+    def generate_host_comparison_chart_for_pdf(self):
+        """Generate host comparison bar chart for PDF"""
+        try:
+            import tempfile
+            import os
+            
+            # Create comparison chart
+            fig_comp, ax_comp = plt.subplots(figsize=(10, 6))
+            fig_comp.patch.set_facecolor('white')
+            ax_comp.set_facecolor('white')
+            
+            # Prepare data
+            hostnames = sorted(self.processed_data['Hostname'].unique())
+            avg_cpu_values = []
+            max_cpu_values = []
+            health_scores = []
+            
+            for hostname in hostnames:
+                host_data = self.processed_data[self.processed_data['Hostname'] == hostname]
+                avg_cpu = host_data['CPU_Ready_Percent'].mean()
+                max_cpu = host_data['CPU_Ready_Percent'].max()
+                health_score = self.calculate_health_score(avg_cpu, max_cpu, host_data['CPU_Ready_Percent'].std())
+                
+                avg_cpu_values.append(avg_cpu)
+                max_cpu_values.append(max_cpu)
+                health_scores.append(health_score)
+            
+            # Create grouped bar chart
+            x = range(len(hostnames))
+            width = 0.35
+            
+            bars1 = ax_comp.bar([i - width/2 for i in x], avg_cpu_values, width, 
+                            label='Average CPU Ready %', color='steelblue', alpha=0.8)
+            bars2 = ax_comp.bar([i + width/2 for i in x], max_cpu_values, width,
+                            label='Maximum CPU Ready %', color='lightcoral', alpha=0.8)
+            
+            # Add threshold lines
+            ax_comp.axhline(y=self.warning_threshold.get(), color='orange', linestyle='--', alpha=0.7, linewidth=2)
+            ax_comp.axhline(y=self.critical_threshold.get(), color='red', linestyle='--', alpha=0.7, linewidth=2)
+            
+            # Styling
+            ax_comp.set_xlabel('Hosts', fontsize=12, color='black')
+            ax_comp.set_ylabel('CPU Ready %', fontsize=12, color='black')
+            ax_comp.set_title('Host Performance Comparison', fontsize=14, fontweight='bold', color='black')
+            ax_comp.set_xticks(x)
+            ax_comp.set_xticklabels([h[:10] for h in hostnames], rotation=45, ha='right')
+            ax_comp.legend()
+            ax_comp.grid(True, alpha=0.3, axis='y')
+            
+            plt.tight_layout()
+            
+            # Save to temporary file
+            with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp_file:
+                fig_comp.savefig(tmp_file.name, dpi=150, bbox_inches='tight', 
+                            facecolor='white', edgecolor='none')
+                
+                from reportlab.platypus import Image
+                chart_img = Image(tmp_file.name, width=7*inch, height=4*inch)
+                
+                plt.close(fig_comp)
+                os.unlink(tmp_file.name)
+                
+                return chart_img
+        except Exception as e:
+            print(f"DEBUG: Could not generate comparison chart for PDF: {e}")
+            return None
+
+    def generate_timeline_analysis_text(self):
+        """Generate timeline analysis text for PDF"""
+        overall_avg = self.processed_data['CPU_Ready_Percent'].mean()
+        overall_max = self.processed_data['CPU_Ready_Percent'].max()
+        date_range = (self.processed_data['Time'].max() - self.processed_data['Time'].min()).days
+        
+        analysis = f"""
+        <b>Timeline Analysis Summary:</b><br/>
+        The performance timeline shows CPU Ready metrics over {date_range} days of monitoring. 
+        Overall average CPU Ready across all hosts is {overall_avg:.2f}%, with a peak value of {overall_max:.2f}%. 
+        """
+        
+        if overall_avg < 2.0:
+            analysis += "The infrastructure shows excellent performance with very low CPU contention. "
+        elif overall_avg < 5.0:
+            analysis += "Performance is good with acceptable CPU Ready levels. "
+        else:
+            analysis += "Elevated CPU Ready levels indicate potential resource contention that should be investigated. "
+        
+        # Add host-specific insights
+        critical_hosts = [h for h in self.processed_data['Hostname'].unique() 
+                        if self.processed_data[self.processed_data['Hostname']==h]['CPU_Ready_Percent'].mean() >= self.critical_threshold.get()]
+        
+        if critical_hosts:
+            analysis += f"<br/><br/><b>Attention Required:</b> {len(critical_hosts)} host(s) exceed critical thresholds and require immediate investigation."
+        else:
+            analysis += "<br/><br/><b>Performance Status:</b> All hosts are operating within acceptable performance parameters."
+        
+        return analysis
+
+    def generate_ai_recommendations_text(self):
+        """Generate AI recommendations analysis text for PDF"""
+        if not hasattr(self, 'current_recommendations') or not self.current_recommendations:
+            return "AI recommendations not available. Please generate recommendations first."
+        
+        total_hosts = len(self.processed_data['Hostname'].unique())
+        recommended_count = len(self.current_recommendations)
+        reduction_percentage = (recommended_count / total_hosts) * 100
+        
+        text = f"""
+        <b>AI Analysis Results:</b><br/>
+        The AI consolidation analysis identified {recommended_count} out of {total_hosts} hosts ({reduction_percentage:.1f}%) 
+        as potential consolidation candidates. These recommendations are based on comprehensive analysis of:
+        <br/><br/>
+        • CPU Ready usage patterns and consistency<br/>
+        • Performance stability over time<br/>
+        • Peak usage and workload distribution<br/>
+        • Risk assessment for workload redistribution<br/>
+        <br/>
+        <b>Risk Assessment:</b><br/>
+        """
+        
+        low_risk = sum(1 for rec in self.current_recommendations 
+                    if rec['metrics']['avg_cpu_ready'] < 2.0 and rec['metrics']['critical_periods'] == 0)
+        medium_risk = sum(1 for rec in self.current_recommendations 
+                        if 2.0 <= rec['metrics']['avg_cpu_ready'] < 5.0)
+        high_risk = recommended_count - low_risk - medium_risk
+        
+        text += f"• Low Risk Candidates: {low_risk} hosts<br/>"
+        text += f"• Medium Risk Candidates: {medium_risk} hosts<br/>"
+        text += f"• High Risk Candidates: {high_risk} hosts<br/>"
+        
+        return text
+
+    def generate_consolidation_impact_text(self):
+        """Generate consolidation impact analysis text"""
+        if not hasattr(self, 'current_recommendations') or not self.current_recommendations:
+            return ""
+        
+        total_hosts = len(self.processed_data['Hostname'].unique())
+        recommended_hosts = [rec['hostname'] for rec in self.current_recommendations]
+        
+        # Calculate workload impact
+        total_workload = self.processed_data['CPU_Ready_Sum'].sum()
+        recommended_workload = self.processed_data[
+            self.processed_data['Hostname'].isin(recommended_hosts)
+        ]['CPU_Ready_Sum'].sum()
+        
+        workload_percentage = (recommended_workload / total_workload) * 100 if total_workload > 0 else 0
+        remaining_hosts = total_hosts - len(recommended_hosts)
+        
+        impact_text = f"""
+        <b>Infrastructure Impact Assessment:</b><br/>
+        • Infrastructure Reduction: {(len(recommended_hosts)/total_hosts)*100:.1f}%<br/>
+        • Workload Redistribution: {workload_percentage:.1f}% of total workload<br/>
+        • Remaining Hosts: {remaining_hosts}<br/>
+        • Additional Load per Host: +{workload_percentage/remaining_hosts:.1f}%<br/>
+        <br/>
+        <b>Risk Level: </b>
+        """
+        
+        if workload_percentage > 30:
+            impact_text += "HIGH - Significant workload redistribution required<br/>"
+        elif workload_percentage > 15:
+            impact_text += "MEDIUM - Moderate redistribution with monitoring recommended<br/>"
+        else:
+            impact_text += "LOW - Safe for consolidation<br/>"
+        
+        # Cost savings estimate
+        annual_savings = len(recommended_hosts) * 20000  # Rough estimate per host
+        impact_text += f"<br/><b>Estimated Annual Savings:</b> ${annual_savings:,} (hardware, power, licensing)"
+        
+        return impact_text
+
+    def generate_distribution_analysis_text(self):
+        """Generate performance distribution analysis text"""
+        overall_std = self.processed_data['CPU_Ready_Percent'].std()
+        overall_mean = self.processed_data['CPU_Ready_Percent'].mean()
+        cv = (overall_std / overall_mean) * 100 if overall_mean > 0 else 0
+        
+        p95 = self.processed_data['CPU_Ready_Percent'].quantile(0.95)
+        p99 = self.processed_data['CPU_Ready_Percent'].quantile(0.99)
+        
+        text = f"""
+        <b>Performance Distribution Analysis:</b><br/>
+        • Standard Deviation: {overall_std:.2f}%<br/>
+        • Coefficient of Variation: {cv:.1f}%<br/>
+        • 95th Percentile: {p95:.2f}%<br/>
+        • 99th Percentile: {p99:.2f}%<br/>
+        <br/>
+        """
+        
+        if cv < 30:
+            text += "<b>Variability Assessment:</b> Low variability indicates consistent performance across the infrastructure."
+        elif cv < 60:
+            text += "<b>Variability Assessment:</b> Moderate variability suggests some performance differences between hosts."
+        else:
+            text += "<b>Variability Assessment:</b> High variability indicates significant performance differences requiring investigation."
+        
+        return text
+
+    def generate_implementation_recommendations(self):
+        """Generate implementation recommendations based on analysis"""
+        overall_avg = self.processed_data['CPU_Ready_Percent'].mean()
+        critical_hosts = len([h for h in self.processed_data['Hostname'].unique() 
+                            if self.processed_data[self.processed_data['Hostname']==h]['CPU_Ready_Percent'].mean() >= self.critical_threshold.get()])
+        
+        recommendations = "<b>Immediate Actions:</b><br/>"
+        
+        if critical_hosts > 0:
+            recommendations += f"• Investigate {critical_hosts} critical host(s) immediately<br/>"
+            recommendations += "• Check for resource contention and workload distribution<br/>"
+            recommendations += "• Consider workload migration from overloaded hosts<br/>"
+        else:
+            recommendations += "• No immediate critical issues identified<br/>"
+        
+        recommendations += "<br/><b>Optimization Opportunities:</b><br/>"
+        
+        if overall_avg < 2.0:
+            recommendations += "• Infrastructure shows consolidation potential<br/>"
+            recommendations += "• Consider implementing AI recommendations for host consolidation<br/>"
+            recommendations += "• Evaluate power and cooling savings opportunities<br/>"
+        elif overall_avg < 5.0:
+            recommendations += "• Good performance baseline established<br/>"
+            recommendations += "• Monitor trends for capacity planning<br/>"
+            recommendations += "• Consider selective consolidation of lowest-utilized hosts<br/>"
+        else:
+            recommendations += "• Focus on performance optimization before consolidation<br/>"
+            recommendations += "• Investigate workload balancing opportunities<br/>"
+            recommendations += "• Review DRS and HA configurations<br/>"
+        
+        recommendations += "<br/><b>Monitoring Recommendations:</b><br/>"
+        recommendations += "• Set up automated alerting for CPU Ready thresholds<br/>"
+        recommendations += "• Implement regular performance trending analysis<br/>"
+        recommendations += "• Schedule quarterly infrastructure health assessments<br/>"
+        recommendations += "• Document performance baselines for future comparison<br/>"
+        
+        return recommendations
 
     def generate_executive_summary(self):
         """Generate executive summary data for PDF report"""
@@ -1794,6 +2174,145 @@ class ModernCPUAnalyzer:
                 print(f"DEBUG: Time analysis error for {hostname}: {e}")
         
         return metrics
+
+    def calculate_enhanced_cpu_ready_percentage(self, subset, interval_seconds, source_info=""):
+        """
+        Enhanced CPU Ready calculation with intelligent format detection
+        """
+        sample_values = subset['CPU_Ready_Sum'].head(20)  # Larger sample
+        avg_sample = sample_values.mean()
+        max_sample = sample_values.max()
+        min_sample = sample_values.min()
+        
+        print(f"DEBUG: Enhanced analysis for {source_info}")
+        print(f"  Sample size: {len(sample_values)}")
+        print(f"  Min: {min_sample:.2f}, Max: {max_sample:.2f}, Avg: {avg_sample:.2f}")
+        print(f"  Interval: {interval_seconds} seconds")
+        
+        # Check for percentage data first (vCenter sometimes returns ready %)
+        if avg_sample <= 100 and max_sample <= 100 and min_sample >= 0:
+            # Check if values are reasonable percentages
+            realistic_check = len(sample_values[sample_values <= 50]) / len(sample_values)
+            if realistic_check > 0.8:  # 80% of values are <= 50%
+                print(f"  Format detected: Already in percentage")
+                subset['CPU_Ready_Percent'] = subset['CPU_Ready_Sum']
+                return subset
+        
+        # Calculate expected maximum CPU Ready in milliseconds for this interval
+        max_possible_ms = interval_seconds * 1000
+        
+        print(f"  Max possible CPU Ready for {interval_seconds}s interval: {max_possible_ms}ms")
+        
+        # Detect data format based on magnitude and interval
+        if avg_sample > max_possible_ms * 10:
+            # Data is likely in microseconds
+            conversion_factor = max_possible_ms * 10  # Conservative estimate
+            subset['CPU_Ready_Percent'] = (subset['CPU_Ready_Sum'] / conversion_factor) * 100
+            print(f"  Format detected: Microseconds, using factor {conversion_factor}")
+            
+        elif avg_sample > max_possible_ms:
+            # Data might be cumulative or in wrong units
+            # Try different approaches based on interval
+            if interval_seconds >= 86400:  # Daily data
+                # For daily data, values might be cumulative seconds
+                conversion_factor = interval_seconds * 100  # Assume centiseconds
+                subset['CPU_Ready_Percent'] = (subset['CPU_Ready_Sum'] / conversion_factor) * 100
+                print(f"  Format detected: Daily cumulative, using factor {conversion_factor}")
+            else:
+                # Standard millisecond conversion but with safety check
+                subset['CPU_Ready_Percent'] = (subset['CPU_Ready_Sum'] / max_possible_ms) * 100
+                print(f"  Format detected: Milliseconds (high values)")
+        
+        elif avg_sample > 1000:
+            # Likely milliseconds (standard vCenter format)
+            subset['CPU_Ready_Percent'] = (subset['CPU_Ready_Sum'] / max_possible_ms) * 100
+            print(f"  Format detected: Milliseconds (standard)")
+            
+        elif avg_sample > 100:
+            # Could be centipercent or permille
+            if interval_seconds >= 7200:  # 2+ hour intervals
+                # Likely cumulative centiseconds for longer periods
+                subset['CPU_Ready_Percent'] = subset['CPU_Ready_Sum'] / 100
+            else:
+                # Likely centipercent
+                subset['CPU_Ready_Percent'] = subset['CPU_Ready_Sum'] / 100
+            print(f"  Format detected: Centipercent/Centiseconds")
+            
+        elif avg_sample > 10:
+            # Could be permille or deciseconds
+            subset['CPU_Ready_Percent'] = subset['CPU_Ready_Sum'] / 10
+            print(f"  Format detected: Permille/Deciseconds")
+            
+        else:
+            # Likely already in reasonable percentage range
+            subset['CPU_Ready_Percent'] = subset['CPU_Ready_Sum']
+            print(f"  Format detected: Direct percentage")
+        
+        # Post-conversion validation
+        final_avg = subset['CPU_Ready_Percent'].mean()
+        final_max = subset['CPU_Ready_Percent'].max()
+        
+        print(f"  After conversion: Avg={final_avg:.3f}%, Max={final_max:.3f}%")
+        
+        # Sanity check - if still way too high, try alternative conversion
+        if final_avg > 50:  # 50% avg is unrealistic for most environments
+            print(f"  WARNING: Still high values, trying alternative conversion")
+            
+            # Try treating as centiseconds instead of milliseconds
+            subset['CPU_Ready_Percent'] = (subset['CPU_Ready_Sum'] / (interval_seconds * 100)) * 100
+            alt_avg = subset['CPU_Ready_Percent'].mean()
+            
+            if alt_avg < final_avg and alt_avg > 0:
+                print(f"  Alternative conversion better: {alt_avg:.3f}%")
+                final_avg = alt_avg
+            else:
+                # If still bad, just cap at reasonable values
+                subset.loc[subset['CPU_Ready_Percent'] > 100, 'CPU_Ready_Percent'] = 100
+                print(f"  Capped extreme values at 100%")
+        
+        return subset
+
+    def enhanced_detect_interval_from_data(self, df, filename=""):
+        """
+        Enhanced interval detection that considers vCenter data characteristics
+        """
+        base_interval = self.detect_interval_from_data(df, filename)
+        
+        # Additional vCenter-specific logic
+        vcenter_format = self.detect_vcenter_data_format(df, filename)
+        
+        if vcenter_format == 'vcenter_summation':
+            print(f"DEBUG: vCenter summation data detected")
+            # Summation data often needs different handling
+            
+        elif vcenter_format == 'vcenter_average':
+            print(f"DEBUG: vCenter average data detected")
+            # Average data is often already processed
+            
+        return base_interval
+
+    # Also add this method to detect vCenter data source type
+    def detect_vcenter_data_format(self, df, filename=""):
+        """
+        Detect vCenter data format based on metadata and content analysis
+        """
+        # Check for vCenter-specific column patterns
+        vcenter_patterns = ['Ready for', 'summation', 'average']
+        
+        ready_cols = [col for col in df.columns if 'ready' in col.lower()]
+        
+        for col in ready_cols:
+            col_lower = col.lower()
+            
+            # Check for vCenter API format indicators
+            if 'summation' in col_lower:
+                return 'vcenter_summation'
+            elif 'average' in col_lower:
+                return 'vcenter_average'
+            elif any(pattern.lower() in col_lower for pattern in vcenter_patterns):
+                return 'vcenter_export'
+        
+        return 'unknown'
 
     def calculate_consolidation_score(self, metrics, strategy):
         """
@@ -3012,7 +3531,6 @@ class ModernCPUAnalyzer:
             
             # Method 4: Validation against expected intervals with ENHANCED daily check
             expected_intervals = {
-                "Real-Time": 20,      # 20 seconds
                 "Last Day": 300,      # 5 minutes
                 "Last Week": 1800,    # 30 minutes
                 "Last Month": 7200,   # 2 hours
@@ -3538,10 +4056,7 @@ class ModernCPUAnalyzer:
     def on_vcenter_connected(self, vcenter_host):
         """Handle successful vCenter connection - FIXED widget usage"""
         self.vcenter_status.config(text="🟢 Connected", fg=self.colors['success'])
-        
-        # FIXED: Use tk.Label config instead of ttk style
-        self.connection_status.config(text="🟢 vCenter Connected", 
-                                    fg=self.colors['success'])
+        self.connection_status.config(text="🟢 vCenter Connected", fg=self.colors['success'])
         
         self.fetch_btn.config(state='normal')
         self.connect_btn.config(text="🔌 Disconnect", 
@@ -3549,6 +4064,8 @@ class ModernCPUAnalyzer:
                             state='normal')
         self.hide_progress()
         messagebox.showinfo("Success", f"Connected to vCenter: {vcenter_host}")
+        if hasattr(self, 'realtime_dashboard'):
+            self.realtime_dashboard.set_vcenter_connection(self.vcenter_connection)
 
     def on_vcenter_connect_failed(self, error_msg):
         """Handle failed vCenter connection - FIXED widget usage"""
@@ -3564,6 +4081,9 @@ class ModernCPUAnalyzer:
 
     def disconnect_vcenter(self):
         """Disconnect from vCenter - FIXED widget usage"""
+        if hasattr(self, 'realtime_dashboard'):
+            self.realtime_dashboard.stop_monitoring()
+            self.realtime_dashboard.set_vcenter_connection(None)
         try:
             if self.vcenter_connection:
                 Disconnect(self.vcenter_connection)
@@ -3571,7 +4091,6 @@ class ModernCPUAnalyzer:
             
             self.vcenter_status.config(text="⚫ Disconnected", fg=self.colors['error'])
             
-            # FIXED: Use tk.Label config instead of ttk style
             self.connection_status.config(text="⚫ Disconnected", 
                                         fg=self.colors['error'])
             
@@ -4095,72 +4614,138 @@ class ModernCPUAnalyzer:
                         interval_seconds = self.intervals[self.current_interval]
                         print(f"DEBUG: Using interval: {self.current_interval} ({interval_seconds} seconds)")
                         
-                        # Analyze sample values to determine data format
-                        sample_values = subset['CPU_Ready_Sum'].head(10)
+                        # Determine data source type
+                        source_file = subset['Source_File'].iloc[0] if 'Source_File' in subset.columns else "unknown"
+                        is_vcenter_data = 'vCenter' in source_file
+                        is_realtime = self.current_interval == "Real-Time"
+                        
+                        print(f"DEBUG: Source: {source_file}, vCenter: {is_vcenter_data}, Real-time: {is_realtime}")
+                        
+                        # Analyze sample values
+                        sample_values = subset['CPU_Ready_Sum'].head(20)
                         avg_sample = sample_values.mean()
                         max_sample = sample_values.max()
                         min_sample = sample_values.min()
                         
                         print(f"DEBUG: Sample statistics - Min: {min_sample:.2f}, Max: {max_sample:.2f}, Avg: {avg_sample:.2f}")
                         
-                        # Data format detection and conversion
-                        if avg_sample > 100000:  # Higher threshold
-                            subset['CPU_Ready_Percent'] = (subset['CPU_Ready_Sum'] / (interval_seconds * 1000)) * 100
-                            print(f"DEBUG: Data appears to be in microseconds, applying conversion factor")
-                            conversion_applied = "microseconds"
-                        elif avg_sample > 1000:
-                            # Data is likely in milliseconds (standard vCenter format)
-                            subset['CPU_Ready_Percent'] = (subset['CPU_Ready_Sum'] / (interval_seconds * 1000)) * 100
-                            print(f"DEBUG: Data appears to be in milliseconds (standard format)")
-                            conversion_applied = "milliseconds"
-                        elif avg_sample > 100:
-                            # Data might be in centipercent or wrong units
-                            subset['CPU_Ready_Percent'] = subset['CPU_Ready_Sum'] / 100
-                            print(f"DEBUG: Data appears to be in centipercent, dividing by 100")
-                            conversion_applied = "centipercent"
-                        elif avg_sample > 10:
-                            # Data might be in permille (per thousand)
-                            subset['CPU_Ready_Percent'] = subset['CPU_Ready_Sum'] / 10
-                            print(f"DEBUG: Data appears to be in permille, dividing by 10")
-                            conversion_applied = "permille"
-                        else:
-                            # Data appears to be already in percentage or reasonable range
-                            subset['CPU_Ready_Percent'] = subset['CPU_Ready_Sum']
-                            print(f"DEBUG: Data appears to be in percentage format already")
-                            conversion_applied = "percentage"
+                        # REAL-TIME DATA HANDLING (Your working case)
+                        if is_realtime or self.current_interval == "Real-Time":
+                            print(f"DEBUG: Processing Real-Time data")
+                            
+                            if avg_sample <= 100 and max_sample <= 100:
+                                # Real-time data is often already in percentage or very close
+                                if avg_sample <= 1:
+                                    subset['CPU_Ready_Percent'] = subset['CPU_Ready_Sum']
+                                    conversion_applied = "realtime_direct"
+                                    print(f"DEBUG: Real-time direct percentage")
+                                else:
+                                    # Might be permille for real-time
+                                    subset['CPU_Ready_Percent'] = subset['CPU_Ready_Sum'] / 10
+                                    conversion_applied = "realtime_permille"
+                                    print(f"DEBUG: Real-time permille conversion")
+                            else:
+                                # Standard millisecond conversion for real-time
+                                max_possible_ms = interval_seconds * 1000  # 20 seconds = 20,000ms
+                                subset['CPU_Ready_Percent'] = (subset['CPU_Ready_Sum'] / max_possible_ms) * 100
+                                conversion_applied = "realtime_milliseconds"
+                                print(f"DEBUG: Real-time millisecond conversion (max possible: {max_possible_ms}ms)")
                         
-                        # Post-conversion validation and outlier handling
+                        # LAST DAY DATA HANDLING (Your problem case)
+                        elif self.current_interval == "Last Day":
+                            print(f"DEBUG: Processing Last Day data - applying conservative conversion")
+                            
+                            # Last Day data from vCenter is often problematic
+                            if avg_sample > 50000:  # Very high values
+                                # Treat as cumulative microseconds over the period
+                                subset['CPU_Ready_Percent'] = (subset['CPU_Ready_Sum'] / (interval_seconds * 100000)) * 100
+                                conversion_applied = "lastday_cumulative_microseconds"
+                                print(f"DEBUG: Last Day cumulative microseconds conversion")
+                                
+                            elif avg_sample > 10000:  # High values 
+                                # Conservative millisecond conversion
+                                subset['CPU_Ready_Percent'] = (subset['CPU_Ready_Sum'] / (interval_seconds * 10000)) * 100
+                                conversion_applied = "lastday_conservative_ms"
+                                print(f"DEBUG: Last Day conservative milliseconds")
+                                
+                            elif avg_sample > 1000:  # Moderate values
+                                # Treat as permille (per thousand)
+                                subset['CPU_Ready_Percent'] = subset['CPU_Ready_Sum'] / 1000
+                                conversion_applied = "lastday_permille"
+                                print(f"DEBUG: Last Day permille conversion")
+                                
+                            elif avg_sample > 100:  # Lower values
+                                # Treat as centipercent
+                                subset['CPU_Ready_Percent'] = subset['CPU_Ready_Sum'] / 100
+                                conversion_applied = "lastday_centipercent"
+                                print(f"DEBUG: Last Day centipercent conversion")
+                                
+                            else:  # Very low values
+                                # Might already be percentage or need minor conversion
+                                subset['CPU_Ready_Percent'] = subset['CPU_Ready_Sum'] / 10
+                                conversion_applied = "lastday_minor"
+                                print(f"DEBUG: Last Day minor conversion")
+                        
+                        # OTHER INTERVALS (Week, Month, Year)
+                        else:
+                            print(f"DEBUG: Processing {self.current_interval} data")
+                            max_possible_ms = interval_seconds * 1000
+                            
+                            if avg_sample > max_possible_ms * 10:
+                                # Very high - likely microseconds
+                                subset['CPU_Ready_Percent'] = (subset['CPU_Ready_Sum'] / (max_possible_ms * 1000)) * 100
+                                conversion_applied = "historical_microseconds"
+                            elif avg_sample > max_possible_ms:
+                                # High - standard milliseconds  
+                                subset['CPU_Ready_Percent'] = (subset['CPU_Ready_Sum'] / max_possible_ms) * 100
+                                conversion_applied = "historical_milliseconds"
+                            elif avg_sample > 1000:
+                                # Medium - conservative milliseconds
+                                subset['CPU_Ready_Percent'] = (subset['CPU_Ready_Sum'] / max_possible_ms) * 100
+                                conversion_applied = "historical_standard"
+                            elif avg_sample > 100:
+                                # Low-medium - centipercent
+                                subset['CPU_Ready_Percent'] = subset['CPU_Ready_Sum'] / 100
+                                conversion_applied = "historical_centipercent"
+                            else:
+                                # Low - direct or minor conversion
+                                subset['CPU_Ready_Percent'] = subset['CPU_Ready_Sum']
+                                conversion_applied = "historical_direct"
+                        
+                        # Post-conversion validation
                         post_avg = subset['CPU_Ready_Percent'].mean()
                         post_max = subset['CPU_Ready_Percent'].max()
-                        post_min = subset['CPU_Ready_Percent'].min()
                         
-                        print(f"DEBUG: After conversion - Min: {post_min:.2f}%, Max: {post_max:.2f}%, Avg: {post_avg:.2f}%")
+                        print(f"DEBUG: After conversion - Avg: {post_avg:.3f}%, Max: {post_max:.3f}%")
+                        print(f"DEBUG: Conversion applied: {conversion_applied}")
                         
-                        # Handle extreme outliers (>100% CPU Ready is theoretically impossible but can happen due to measurement issues)
-                        extreme_outliers = subset[subset['CPU_Ready_Percent'] > 100]
-                        if len(extreme_outliers) > 0:
-                            outlier_pct = (len(extreme_outliers) / len(subset)) * 100
-                            print(f"DEBUG: Found {len(extreme_outliers)} extreme outliers for {hostname} ({outlier_pct:.1f}% of data)")
+                        # EMERGENCY CORRECTION for impossible values
+                        if post_avg > 100:  # Impossible - more than 100% CPU Ready
+                            print(f"DEBUG: EMERGENCY: Impossible values detected ({post_avg:.1f}%), applying emergency fix")
                             
-                            if outlier_pct > 50:
-                                # If more than 50% are outliers, the conversion is probably wrong
-                                warning_msg = f"Host {hostname}: {outlier_pct:.1f}% of values >100% - possible incorrect data format detection"
-                                processing_warnings.append(warning_msg)
-                                
-                                # Try alternative conversion
-                                if conversion_applied == "milliseconds":
-                                    subset['CPU_Ready_Percent'] = subset['CPU_Ready_Sum'] / 1000
-                                    print(f"DEBUG: Retrying with different conversion factor")
-                                    post_avg = subset['CPU_Ready_Percent'].mean()
-                                    post_max = subset['CPU_Ready_Percent'].max()
+                            # Try progressively more conservative conversions
+                            emergency_conversions = [
+                                subset['CPU_Ready_Sum'] / 1000,   # Treat as permille
+                                subset['CPU_Ready_Sum'] / 10000,  # Very conservative
+                                subset['CPU_Ready_Sum'] / 100000, # Ultra conservative
+                            ]
                             
-                            # Cap values at reasonable maximum (200% to allow for some measurement variance)
-                            reasonable_max = 200
-                            subset.loc[subset['CPU_Ready_Percent'] > reasonable_max, 'CPU_Ready_Percent'] = reasonable_max
-                            
-                            capped_count = len(subset[subset['CPU_Ready_Percent'] == reasonable_max])
-                            if capped_count > 0:
-                                print(f"DEBUG: Capped {capped_count} values at {reasonable_max}%")
+                            for i, emergency_result in enumerate(emergency_conversions):
+                                emergency_avg = emergency_result.mean()
+                                if 0.001 <= emergency_avg <= 50:  # Reasonable range
+                                    subset['CPU_Ready_Percent'] = emergency_result
+                                    conversion_applied = f"emergency_fix_{i+1}"
+                                    print(f"DEBUG: Emergency fix {i+1} applied: {emergency_avg:.3f}%")
+                                    break
+                            else:
+                                # Last resort - just cap the values
+                                subset['CPU_Ready_Percent'] = subset['CPU_Ready_Percent'] / 100
+                                conversion_applied = "emergency_cap"
+                                print(f"DEBUG: Emergency cap applied")
+                        
+                        # Cap any remaining outliers
+                        subset.loc[subset['CPU_Ready_Percent'] > 100, 'CPU_Ready_Percent'] = 100
+                        subset.loc[subset['CPU_Ready_Percent'] < 0, 'CPU_Ready_Percent'] = 0
                         
                         # Final statistics
                         final_avg = subset['CPU_Ready_Percent'].mean()
@@ -4169,16 +4754,31 @@ class ModernCPUAnalyzer:
                         final_std = subset['CPU_Ready_Percent'].std()
                         
                         print(f"DEBUG: Host {hostname} - FINAL stats:")
+                        print(f"  Avg: {final_avg:.3f}%, Max: {final_max:.3f}%, Min: {final_min:.3f}%")
+                        print(f"  Conversion: {conversion_applied}")
+                        
+                        # Validation warnings
+                        if final_avg > 50:
+                            warning_msg = f"Host {hostname}: Very high CPU Ready ({final_avg:.1f}%) - check data source"
+                            processing_warnings.append(warning_msg)
+                        elif final_avg < 0.001:
+                            warning_msg = f"Host {hostname}: Very low CPU Ready ({final_avg:.4f}%) - check conversion"
+                            processing_warnings.append(warning_msg)
+                        
+                        print(f"DEBUG: Host {hostname} - FINAL stats:")
                         print(f"  Min: {final_min:.2f}%, Max: {final_max:.2f}%, Avg: {final_avg:.2f}%, Std: {final_std:.2f}%")
                         print(f"  Conversion applied: {conversion_applied}")
-                        print(f"  Sample values: {subset['CPU_Ready_Percent'].head().tolist()}")
-                        
-                        # Quality check - warn if data seems unusual
-                        if final_avg > 50:
+                        print(f"  Sample final values: {subset['CPU_Ready_Percent'].head(5).tolist()}")
+        
+                        # Quality warnings
+                        if final_avg > 30:
                             warning_msg = f"Host {hostname}: Very high average CPU Ready ({final_avg:.1f}%) - verify data accuracy"
                             processing_warnings.append(warning_msg)
-                        elif final_max < 1 and final_avg < 0.1:
-                            warning_msg = f"Host {hostname}: Very low CPU Ready values ({final_avg:.3f}%) - may indicate low load or incorrect scaling"
+                        elif final_max < 0.1 and final_avg < 0.01:
+                            warning_msg = f"Host {hostname}: Very low CPU Ready values ({final_avg:.4f}%) - may indicate measurement issues"
+                            processing_warnings.append(warning_msg)
+                        elif final_avg > 0 and final_std / final_avg > 5:  # Very high variability
+                            warning_msg = f"Host {hostname}: Very high variability in CPU Ready measurements"
                             processing_warnings.append(warning_msg)
                         
                         combined_data.append(subset)
@@ -5468,25 +6068,61 @@ Thresholds: Warning {warning_level}% | Critical {critical_level}%
                 
             except Exception as e:
                 messagebox.showerror("Export Error", f"Failed to export report:\n{str(e)}")
+
+    def on_threshold_change(self):
+        """Called when thresholds are updated"""
+        if hasattr(self, 'realtime_dashboard'):
+            self.realtime_dashboard.update_thresholds(
+                self.warning_threshold.get(),
+                self.critical_threshold.get()
+            )
     
     def on_closing(self):
-        """Handle application closing"""
+        """Handle application closing with proper cleanup"""
         try:
+            print("DEBUG: Application closing...")
+            if hasattr(self, 'realtime_dashboard'):
+                self.realtime_dashboard.cleanup()
+            # Disconnect vCenter if connected
             if hasattr(self, 'vcenter_connection') and self.vcenter_connection:
-                Disconnect(self.vcenter_connection)
+                try:
+                    from pyVmomi.VmomiSupport import Disconnect
+                    Disconnect(self.vcenter_connection)
+                    print("DEBUG: vCenter disconnected")
+                except Exception as e:
+                    print(f"DEBUG: Error disconnecting vCenter: {e}")
             
+            # Close matplotlib figures
             if hasattr(self, 'fig'):
-                plt.close(self.fig)
+                try:
+                    plt.close(self.fig)
+                    print("DEBUG: Main figure closed")
+                except Exception as e:
+                    print(f"DEBUG: Error closing main figure: {e}")
             
-            plt.close('all')
-            self.root.quit()
-            self.root.destroy()
+            # Close all matplotlib figures
+            try:
+                plt.close('all')
+                print("DEBUG: All matplotlib figures closed")
+            except Exception as e:
+                print(f"DEBUG: Error closing all figures: {e}")
             
+            # Destroy the root window
+            try:
+                self.root.quit()  # Stops the mainloop
+                self.root.destroy()  # Destroys the window
+                print("DEBUG: Tkinter window destroyed")
+            except Exception as e:
+                print(f"DEBUG: Error destroying window: {e}")
+                
         except Exception as e:
-            print(f"Error during cleanup: {e}")
+            print(f"DEBUG: Error during cleanup: {e}")
         finally:
+            # Force exit if needed
             import sys
-            sys.exit(0)
+            import os
+            print("DEBUG: Forcing application exit")
+            os._exit(0)  # This will force quit the application
 
     def create_about_tab(self):
         """Create scrollable about tab with application and developer information"""
