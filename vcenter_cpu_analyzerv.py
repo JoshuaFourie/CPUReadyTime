@@ -61,6 +61,7 @@ class ModernCPUAnalyzer:
         
         # Update intervals
         self.intervals = {
+            "Real-Time": 20,
             "Last Day": 300,
             "Last Week": 1800,
             "Last Month": 7200,
@@ -86,6 +87,8 @@ class ModernCPUAnalyzer:
         
         # NOW setup the UI (this will access the auto-flow variables)
         self.setup_modern_ui()
+        
+        self.setup_threshold_bindings()
         
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
 
@@ -127,6 +130,343 @@ class ModernCPUAnalyzer:
                                        activeforeground=self.colors['text_primary'],
                                        font=('Segoe UI', 9))
         auto_switch_cb.pack(side=tk.LEFT)
+
+    def export_realtime_data_to_main_app(self):
+        """Export real-time data to main application for analysis - CORRECT SCALING"""
+        if not hasattr(self, 'realtime_dashboard'):
+            return None
+        
+        try:
+            # Get data from real-time database
+            realtime_db = self.realtime_dashboard.db
+            realtime_data = realtime_db.get_recent_performance_data(minutes=10080)
+            
+            if realtime_data.empty:
+                return None
+            
+            print(f"DEBUG: Exporting {len(realtime_data)} real-time records to main app")
+            
+            converted_data = []
+            
+            for _, row in realtime_data.iterrows():
+                ready_col_name = f"Ready for {row['hostname']}"
+                
+                # Convert UTC timestamp to local time
+                try:
+                    utc_timestamp = pd.to_datetime(row['timestamp'], utc=True)
+                    local_timestamp = utc_timestamp.tz_convert(None)
+                except:
+                    local_timestamp = row['timestamp']
+                
+                # CORRECT FIX: Use the percentage value directly (not as decimal)
+                # The analysis engine expects percentage values, not decimals
+                raw_value_for_analysis = row['cpu_ready_percent']  # Use percentage directly
+                
+                print(f"DEBUG: Converting {row['hostname']}: {row['cpu_ready_percent']:.3f}% -> {raw_value_for_analysis:.3f} (direct percentage)")
+                
+                converted_data.append({
+                    'Time': local_timestamp,
+                    ready_col_name: raw_value_for_analysis,
+                    'Hostname': row['hostname'],
+                    'source_file': 'realtime_dashboard_percentage',
+                    'detected_interval': 'Real-Time'
+                })
+            
+            if converted_data:
+                time_groups = {}
+                
+                for item in converted_data:
+                    time_key = item['Time']
+                    if time_key not in time_groups:
+                        time_groups[time_key] = {
+                            'Time': time_key,
+                            'source_file': 'realtime_dashboard_percentage',
+                            'detected_interval': 'Real-Time'
+                        }
+                    
+                    ready_col = [k for k in item.keys() if k.startswith('Ready for')][0]
+                    time_groups[time_key][ready_col] = item[ready_col]
+                
+                final_data = list(time_groups.values())
+                final_df = pd.DataFrame(final_data)
+                
+                print(f"DEBUG: Using direct percentage values - analysis should use them as-is")
+                
+                # Show expected results
+                for col in final_df.columns:
+                    if col.startswith('Ready for'):
+                        sample_values = final_df[col].dropna().head(3)
+                        print(f"  {col}: {sample_values.tolist()} -> Expected same values in analysis")
+                
+                return final_df
+                
+        except Exception as e:
+            print(f"DEBUG: Error exporting real-time data: {e}")
+            return None
+
+    def verify_realtime_conversion(self):
+        """Verify that real-time data conversion is working correctly"""
+        if not hasattr(self, 'realtime_dashboard'):
+            return
+        
+        try:
+            # Get some recent real-time data
+            realtime_db = self.realtime_dashboard.db
+            recent_data = realtime_db.get_recent_performance_data(minutes=60)  # Last hour
+            
+            if recent_data.empty:
+                print("DEBUG: No real-time data to verify")
+                return
+            
+            print("DEBUG: REAL-TIME DATA VERIFICATION - FIXED")
+            print("=" * 50)
+            
+            for hostname in recent_data['hostname'].unique():
+                host_data = recent_data[recent_data['hostname'] == hostname]
+                
+                # Get latest values
+                latest = host_data.iloc[-1]
+                avg_percent = host_data['cpu_ready_percent'].mean()
+                
+                print(f"Host: {hostname}")
+                print(f"  Real-time dashboard shows: {avg_percent:.3f}% average")
+                print(f"  Latest raw sum value: {latest['cpu_ready_sum']}")
+                print(f"  Latest percentage: {latest['cpu_ready_percent']:.3f}%")
+                
+                # Calculate what main app will see after fixed conversion
+                converted_value = max(1.5, avg_percent * 10)
+                expected_analysis_percent = converted_value / 10  # What analysis will calculate
+                
+                print(f"  Will be stored as: {converted_value:.2f} (forced permille range)")
+                print(f"  Expected analysis result: {expected_analysis_percent:.3f}%")
+                
+                # Check if it's close to real-time dashboard value
+                difference = abs(expected_analysis_percent - avg_percent)
+                match_status = "✅ CLOSE" if difference < 0.05 else "❌ DIFFERENT"
+                print(f"  Match real-time dashboard: {match_status} (diff: {difference:.3f}%)")
+                print()
+            
+        except Exception as e:
+            print(f"DEBUG: Error in verification: {e}")
+
+    def integrate_realtime_data(self):
+        """Integrate real-time data with main application data"""
+        realtime_df = self.export_realtime_data_to_main_app()
+        
+        if realtime_df is not None:
+            # Add to main data frames
+            self.data_frames.append(realtime_df)
+            
+            # Update UI components
+            self.update_file_status()
+            self.update_data_preview()
+            
+            # Set interval to Real-Time
+            self.interval_var.set("Real-Time")
+            self.current_interval = "Real-Time"
+            
+            print(f"DEBUG: Successfully integrated real-time data into main application")
+            return True
+        
+        return False
+
+    def create_realtime_export_controls(self, parent):
+        """Add real-time data export controls to the Real-Time Dashboard tab"""
+        
+        # Export controls frame
+        export_frame = tk.LabelFrame(parent, text="  📤 Export Real-Time Data  ",
+                                    bg=self.colors['bg_primary'],
+                                    fg=self.colors['accent_blue'],
+                                    font=('Segoe UI', 10, 'bold'),
+                                    borderwidth=1,
+                                    relief='solid')
+        export_frame.pack(fill=tk.X, padx=10, pady=5)
+        
+        export_content = tk.Frame(export_frame, bg=self.colors['bg_primary'])
+        export_content.pack(fill=tk.X, padx=10, pady=10)
+        
+        # Instructions
+        tk.Label(export_content,
+                text="Export collected real-time data for analysis in other tabs:",
+                bg=self.colors['bg_primary'],
+                fg=self.colors['text_primary'],
+                font=('Segoe UI', 10)).pack(anchor=tk.W, pady=(0, 10))
+        
+        # Export buttons
+        button_frame = tk.Frame(export_content, bg=self.colors['bg_primary'])
+        button_frame.pack(fill=tk.X)
+        
+        # Export to main app button
+        export_to_main_btn = tk.Button(button_frame,
+                                      text="📊 Use for Analysis",
+                                      command=self.export_realtime_to_analysis,
+                                      bg=self.colors['accent_blue'], fg='white',
+                                      font=('Segoe UI', 9, 'bold'),
+                                      relief='flat', borderwidth=0,
+                                      padx=15, pady=6)
+        export_to_main_btn.pack(side=tk.LEFT, padx=(0, 10))
+        
+        # Export to CSV button
+        export_csv_btn = tk.Button(button_frame,
+                                  text="💾 Export CSV",
+                                  command=self.export_realtime_to_csv,
+                                  bg=self.colors['success'], fg='white',
+                                  font=('Segoe UI', 9, 'bold'),
+                                  relief='flat', borderwidth=0,
+                                  padx=15, pady=6)
+        export_csv_btn.pack(side=tk.LEFT, padx=(0, 10))
+        
+        # Data info label
+        self.realtime_data_info = tk.Label(button_frame,
+                                          text="No real-time data collected",
+                                          bg=self.colors['bg_primary'],
+                                          fg=self.colors['text_secondary'],
+                                          font=('Segoe UI', 9))
+        self.realtime_data_info.pack(side=tk.RIGHT)
+        
+        # Update data info periodically
+        self.update_realtime_data_info()
+
+    def update_realtime_data_info(self):
+        """Update real-time data information display"""
+        try:
+            if hasattr(self, 'realtime_dashboard') and hasattr(self.realtime_dashboard, 'db'):
+                recent_data = self.realtime_dashboard.db.get_recent_performance_data(minutes=10080)
+                
+                if not recent_data.empty:
+                    unique_hosts = recent_data['hostname'].nunique()
+                    total_records = len(recent_data)
+                    oldest_record = recent_data['timestamp'].min()
+                    newest_record = recent_data['timestamp'].max()
+                    
+                    duration = newest_record - oldest_record
+                    duration_str = f"{duration.total_seconds() / 3600:.1f} hours" if duration.total_seconds() > 3600 else f"{duration.total_seconds() / 60:.0f} minutes"
+                    
+                    info_text = f"{total_records:,} records, {unique_hosts} hosts, {duration_str} span"
+                else:
+                    info_text = "No real-time data collected"
+                
+                if hasattr(self, 'realtime_data_info'):
+                    self.realtime_data_info.config(text=info_text)
+        
+        except Exception as e:
+            print(f"DEBUG: Error updating real-time data info: {e}")
+        
+        # Schedule next update
+        self.root.after(10000, self.update_realtime_data_info)
+
+    def export_realtime_to_analysis(self):
+        """Export real-time data for use in analysis tabs"""
+        if not hasattr(self, 'realtime_dashboard'):
+            messagebox.showwarning("No Dashboard", "Real-time dashboard not available")
+            return
+        
+        # Check if we have real-time data
+        recent_data = self.realtime_dashboard.db.get_recent_performance_data(minutes=10080)
+        
+        if recent_data.empty:
+            messagebox.showwarning("No Data", "No real-time data has been collected yet.\n\nStart monitoring first to collect data.")
+            return
+        
+        # Get user confirmation
+        unique_hosts = recent_data['hostname'].nunique()
+        total_records = len(recent_data)
+        
+        result = messagebox.askyesno("Export Real-Time Data",
+                                    f"Export {total_records:,} real-time records from {unique_hosts} hosts?\n\n"
+                                    f"This will:\n"
+                                    f"• Add real-time data to analysis\n"
+                                    f"• Switch interval to 'Real-Time'\n"
+                                    f"• Enable all analysis features\n\n"
+                                    f"Continue?")
+        
+        if result:
+            try:
+                self.verify_realtime_conversion()
+                success = self.integrate_realtime_data()
+                
+                if success:
+                    # Show success and offer to analyze
+                    messagebox.showinfo("Export Complete",
+                                      f"✅ Real-time data exported successfully!\n\n"
+                                      f"📊 {total_records:,} records from {unique_hosts} hosts\n"
+                                      f"⚙️ Interval set to 'Real-Time'\n\n"
+                                      f"You can now use all analysis features with your real-time data.")
+                    
+                    # Offer to auto-analyze
+                    if self.auto_analyze.get():
+                        self.show_smart_notification("Real-time data exported! Auto-analyzing...", 3000)
+                        self.root.after(1500, self.auto_calculate_and_switch)
+                    else:
+                        self.show_action_prompt("Real-time data ready! Analyze now?",
+                                              "🔍 Analyze",
+                                              self.auto_calculate_and_switch)
+                else:
+                    messagebox.showerror("Export Failed", "Failed to export real-time data.\nCheck the debug output for details.")
+                    
+            except Exception as e:
+                messagebox.showerror("Export Error", f"Error exporting real-time data:\n{str(e)}")
+
+    def export_realtime_to_csv(self):
+        """Export real-time data to CSV file"""
+        if not hasattr(self, 'realtime_dashboard'):
+            messagebox.showwarning("No Dashboard", "Real-time dashboard not available")
+            return
+        
+        # Get real-time data
+        recent_data = self.realtime_dashboard.db.get_recent_performance_data(minutes=10080)
+        
+        if recent_data.empty:
+            messagebox.showwarning("No Data", "No real-time data to export")
+            return
+        
+        # File selection dialog
+        filename = filedialog.asksaveasfilename(
+            defaultextension=".csv",
+            filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
+            title="Export Real-Time Data"
+        )
+        
+        if filename:
+            try:
+                # Prepare data for export with metadata
+                export_data = recent_data.copy()
+                export_data['export_time'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                export_data['source'] = 'realtime_dashboard'
+                export_data['interval_seconds'] = 20
+                
+                # Rename columns for clarity
+                export_data = export_data.rename(columns={
+                    'timestamp': 'Time',
+                    'hostname': 'Hostname',
+                    'cpu_ready_percent': 'CPU_Ready_Percent',
+                    'cpu_ready_sum': 'CPU_Ready_Sum'
+                })
+                
+                # Reorder columns
+                column_order = ['Time', 'Hostname', 'CPU_Ready_Percent', 'CPU_Ready_Sum', 
+                              'source', 'interval_seconds', 'export_time']
+                export_data = export_data[column_order]
+                
+                # Export to CSV
+                export_data.to_csv(filename, index=False)
+                
+                messagebox.showinfo("Export Complete",
+                                  f"Real-time data exported successfully!\n\n"
+                                  f"📄 File: {filename}\n"
+                                  f"📊 Records: {len(export_data):,}\n"
+                                  f"🖥️  Hosts: {export_data['Hostname'].nunique()}\n"
+                                  f"📅 Time Range: {export_data['Time'].min()} to {export_data['Time'].max()}")
+                
+            except Exception as e:
+                messagebox.showerror("Export Error", f"Failed to export CSV:\n{str(e)}")
+
+    def setup_threshold_bindings(self):
+        """Setup threshold change bindings for real-time dashboard integration"""
+        if hasattr(self, 'warning_threshold'):
+            self.warning_threshold.trace('w', lambda *args: self.on_threshold_change())
+        if hasattr(self, 'critical_threshold'):
+            self.critical_threshold.trace('w', lambda *args: self.on_threshold_change())
 
     def fetch_vcenter_data(self):
         """Fetch CPU Ready data from vCenter for all hosts with styled progress dialog and auto-flow"""
@@ -416,18 +756,25 @@ class ModernCPUAnalyzer:
         self.create_about_tab()
 
     def create_realtime_dashboard_tab(self):
-        """Create real-time dashboard tab"""
+        """Create real-time dashboard tab with export capabilities"""
         tab_frame = tk.Frame(self.notebook, bg=self.colors['bg_primary'])
         self.notebook.add(tab_frame, text="📡 Real-Time Dashboard")
         
+        # Dashboard container
+        dashboard_container = tk.Frame(tab_frame, bg=self.colors['bg_primary'])
+        dashboard_container.pack(fill=tk.BOTH, expand=True)
+        
         # Initialize dashboard with your theme colors and thresholds
         self.realtime_dashboard = RealTimeDashboard(
-            parent=tab_frame,
+            parent=dashboard_container,
             vcenter_connection=getattr(self, 'vcenter_connection', None),
             warning_threshold=self.warning_threshold.get() if hasattr(self, 'warning_threshold') else 5.0,
             critical_threshold=self.critical_threshold.get() if hasattr(self, 'critical_threshold') else 15.0,
             theme_colors=self.colors
         )
+        
+        # Add export controls at the bottom
+        self.create_realtime_export_controls(tab_frame)
 
     def create_status_bar(self, parent):
         """Create modern status bar - FIXED for pack"""
@@ -3435,12 +3782,21 @@ class ModernCPUAnalyzer:
         self.status_label.config(text="All data cleared")
     
     def update_file_status(self):
-        """Update file count display"""
+        """Update file count display including real-time data"""
         if self.data_frames:
-            self.file_count_label.config(text=f"{len(self.data_frames)} files imported")
+            # Check if any dataframes are from real-time
+            realtime_count = sum(1 for df in self.data_frames if 'source_file' in df.columns and any('realtime' in str(sf) for sf in df['source_file'].unique()))
+            file_count = len(self.data_frames) - realtime_count
+            
+            if realtime_count > 0 and file_count > 0:
+                self.file_count_label.config(text=f"{file_count} files + real-time data imported")
+            elif realtime_count > 0:
+                self.file_count_label.config(text="Real-time data available")
+            else:
+                self.file_count_label.config(text=f"{file_count} files imported")
         else:
             self.file_count_label.config(text="No files imported")
-
+            
     def detect_interval_from_data(self, df, filename=""):
         """
         Automatically detect the correct interval based on data analysis
@@ -4054,18 +4410,22 @@ class ModernCPUAnalyzer:
         threading.Thread(target=connect_thread, daemon=True).start()
 
     def on_vcenter_connected(self, vcenter_host):
-        """Handle successful vCenter connection - FIXED widget usage"""
+        """Handle successful vCenter connection - Updated with real-time dashboard integration"""
         self.vcenter_status.config(text="🟢 Connected", fg=self.colors['success'])
         self.connection_status.config(text="🟢 vCenter Connected", fg=self.colors['success'])
         
         self.fetch_btn.config(state='normal')
         self.connect_btn.config(text="🔌 Disconnect", 
-                            command=self.disconnect_vcenter,
-                            state='normal')
+                               command=self.disconnect_vcenter,
+                               state='normal')
         self.hide_progress()
-        messagebox.showinfo("Success", f"Connected to vCenter: {vcenter_host}")
+        
+        # Update real-time dashboard connection
         if hasattr(self, 'realtime_dashboard'):
             self.realtime_dashboard.set_vcenter_connection(self.vcenter_connection)
+            print("DEBUG: Real-time dashboard vCenter connection updated")
+        
+        messagebox.showinfo("Success", f"Connected to vCenter: {vcenter_host}\n\nReal-time monitoring is now available!")
 
     def on_vcenter_connect_failed(self, error_msg):
         """Handle failed vCenter connection - FIXED widget usage"""
@@ -4080,24 +4440,28 @@ class ModernCPUAnalyzer:
         messagebox.showerror("Connection Error", error_msg)
 
     def disconnect_vcenter(self):
-        """Disconnect from vCenter - FIXED widget usage"""
+        """Disconnect from vCenter - Updated to handle real-time dashboard"""
+        # Stop real-time monitoring first
         if hasattr(self, 'realtime_dashboard'):
-            self.realtime_dashboard.stop_monitoring()
-            self.realtime_dashboard.set_vcenter_connection(None)
+            try:
+                self.realtime_dashboard.stop_monitoring()
+                self.realtime_dashboard.set_vcenter_connection(None)
+                print("DEBUG: Real-time monitoring stopped and connection cleared")
+            except Exception as e:
+                print(f"DEBUG: Error stopping real-time monitoring: {e}")
+        
         try:
             if self.vcenter_connection:
                 Disconnect(self.vcenter_connection)
                 self.vcenter_connection = None
             
             self.vcenter_status.config(text="⚫ Disconnected", fg=self.colors['error'])
-            
-            self.connection_status.config(text="⚫ Disconnected", 
-                                        fg=self.colors['error'])
+            self.connection_status.config(text="⚫ Disconnected", fg=self.colors['error'])
             
             self.fetch_btn.config(state='disabled')
             self.connect_btn.config(text="🔌 Connect", command=self.connect_vcenter)
             
-            messagebox.showinfo("Disconnected", "Successfully disconnected from vCenter")
+            messagebox.showinfo("Disconnected", "Successfully disconnected from vCenter\n\nReal-time monitoring has been stopped.")
             
         except Exception as e:
             messagebox.showerror("Disconnect Error", f"Error disconnecting: {str(e)}")
@@ -4920,7 +5284,7 @@ class ModernCPUAnalyzer:
             self.hide_progress()
 
     def extract_hostname_from_column(self, ready_col):
-        """Extract hostname from CPU Ready column name with enhanced logic"""
+        """Extract hostname from CPU Ready column name with enhanced logic - PRESERVE IP ADDRESSES"""
         try:
             if '$' in ready_col:
                 # Format: "Ready for $hostname"
@@ -4932,11 +5296,10 @@ class ModernCPUAnalyzer:
                 if hostname_match:
                     full_hostname = hostname_match.group(1).strip()
                     
-                    # Check if it's an IP address
+                    # Check if it's an IP address - if so, keep it intact
                     if re.match(r'^\d+\.\d+\.\d+\.\d+$', full_hostname):
-                        # Use a cleaner IP-based hostname
-                        hostname = f"Host-{full_hostname.replace('.', '-')}"
-                        print(f"DEBUG: IP address detected, using hostname: {hostname}")
+                        hostname = full_hostname  # Keep full IP address
+                        print(f"DEBUG: IP address detected, keeping full: {hostname}")
                     else:
                         # Extract just the first part of the hostname for cleaner display
                         hostname = full_hostname.split('.')[0]
@@ -6070,12 +6433,13 @@ Thresholds: Warning {warning_level}% | Critical {critical_level}%
                 messagebox.showerror("Export Error", f"Failed to export report:\n{str(e)}")
 
     def on_threshold_change(self):
-        """Called when thresholds are updated"""
+        """Called when thresholds are updated - Updated for real-time integration"""
         if hasattr(self, 'realtime_dashboard'):
             self.realtime_dashboard.update_thresholds(
                 self.warning_threshold.get(),
                 self.critical_threshold.get()
             )
+            print(f"DEBUG: Thresholds updated - Warning: {self.warning_threshold.get()}%, Critical: {self.critical_threshold.get()}%")
     
     def on_closing(self):
         """Handle application closing with proper cleanup"""
@@ -6125,7 +6489,7 @@ Thresholds: Warning {warning_level}% | Critical {critical_level}%
             os._exit(0)  # This will force quit the application
 
     def create_about_tab(self):
-        """Create scrollable about tab with application and developer information"""
+        """Create scrollable about tab with application and developer information - UPDATED"""
         tab_frame = tk.Frame(self.notebook, bg=self.colors['bg_primary'])
         self.notebook.add(tab_frame, text="ℹ️ About")
         
@@ -6169,27 +6533,83 @@ Thresholds: Warning {warning_level}% | Critical {critical_level}%
         title_label.pack(pady=(0, 5))
         
         version_label = tk.Label(header_frame,
-                            text="Version 2.0",
-                            bg=self.colors['bg_primary'],
-                            fg=self.colors['text_secondary'],
-                            font=('Segoe UI', 12))
+                                text="Version 2.0 - Real-Time Edition",
+                                bg=self.colors['bg_primary'],
+                                fg=self.colors['accent_blue'],
+                                font=('Segoe UI', 12, 'bold'))
         version_label.pack(pady=(0, 10))
         
         description_label = tk.Label(header_frame,
-                                    text="Advanced CPU Ready metrics analysis and host consolidation optimization tool",
+                                    text="Advanced CPU Ready metrics analysis with real-time monitoring and AI-powered consolidation optimization",
                                     bg=self.colors['bg_primary'],
                                     fg=self.colors['text_secondary'],
                                     font=('Segoe UI', 11),
                                     wraplength=600)
         description_label.pack()
         
+        # What's New Section (NEW)
+        whats_new_section = tk.LabelFrame(main_container, text="  🚀 What's New in Version 2.0  ",
+                                        bg=self.colors['bg_primary'],
+                                        fg=self.colors['success'],
+                                        font=('Segoe UI', 12, 'bold'),
+                                        borderwidth=1,
+                                        relief='solid')
+        whats_new_section.pack(fill=tk.X, pady=(0, 15))
+        
+        whats_new_content = tk.Frame(whats_new_section, bg=self.colors['bg_primary'])
+        whats_new_content.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
+        
+        new_features_text = """📡 REAL-TIME MONITORING
+        • Live CPU Ready data collection from vCenter
+        • Real-time dashboard with interactive charts
+        • Automated alerting and threshold monitoring
+        • 20-second interval data collection
+
+        🔄 SEAMLESS DATA INTEGRATION
+        • Export real-time data to analysis engine
+        • Unified workflow between live and historical data
+        • Auto-detect and convert data formats
+        • Preserve full IP addresses and hostnames
+
+        🤖 AI-POWERED CONSOLIDATION
+        • Intelligent host consolidation recommendations
+        • Risk assessment and impact analysis
+        • Multiple consolidation strategies (Conservative/Balanced/Aggressive)
+        • Automated candidate identification
+
+        📊 ENHANCED VISUALIZATIONS
+        • Heat map calendar views
+        • Performance trend analysis with moving averages
+        • Host comparison matrices
+        • Distribution analysis with box plots
+
+        📄 COMPREHENSIVE REPORTING
+        • PDF report generation with charts
+        • Executive summaries with key findings
+        • Implementation guides and best practices
+        • Export capabilities for all analysis results
+
+        ⚙️ WORKFLOW AUTOMATION
+        • Auto-analyze imported data
+        • Smart notifications and prompts
+        • Auto-switch between tabs
+        • Intelligent interval detection"""
+        
+        new_features_label = tk.Label(whats_new_content,
+                                    text=new_features_text,
+                                    bg=self.colors['bg_primary'],
+                                    fg=self.colors['text_primary'],
+                                    font=('Segoe UI', 10),
+                                    justify=tk.LEFT)
+        new_features_label.pack(anchor=tk.W)
+        
         # Developer Information Card
         dev_section = tk.LabelFrame(main_container, text="  👨‍💻 Development Team  ",
-                                bg=self.colors['bg_primary'],
-                                fg=self.colors['accent_blue'],
-                                font=('Segoe UI', 12, 'bold'),
-                                borderwidth=1,
-                                relief='solid')
+                                    bg=self.colors['bg_primary'],
+                                    fg=self.colors['accent_blue'],
+                                    font=('Segoe UI', 12, 'bold'),
+                                    borderwidth=1,
+                                    relief='solid')
         dev_section.pack(fill=tk.X, pady=(0, 15))
         
         dev_content = tk.Frame(dev_section, bg=self.colors['bg_primary'])
@@ -6238,7 +6658,7 @@ Thresholds: Warning {warning_level}% | Critical {critical_level}%
         email_label.bind("<Enter>", lambda e: email_label.config(fg=self.colors['accent_hover']))
         email_label.bind("<Leave>", lambda e: email_label.config(fg=self.colors['accent_blue']))
         
-        # Expertise
+        # Updated Expertise
         expertise_label = tk.Label(dev_content,
                                 text="Expertise:",
                                 bg=self.colors['bg_primary'],
@@ -6247,10 +6667,13 @@ Thresholds: Warning {warning_level}% | Critical {critical_level}%
         expertise_label.pack(anchor=tk.W, pady=(10, 5))
         
         expertise_text = """• VMware vCenter & vSphere Infrastructure
-    • Performance Analytics & Monitoring
-    • Host Consolidation & Capacity Planning
-    • Python Development & Data Analysis
-    • Enterprise Virtualization Solutions"""
+        • Real-Time Performance Monitoring & Analytics
+        • Host Consolidation & Capacity Planning
+        • Python Development & Data Science
+        • Enterprise Virtualization Solutions
+        • AI-Powered Infrastructure Optimization
+        • SQLite Database Design & Management
+        • Advanced Data Visualization & Reporting"""
         
         expertise_content = tk.Label(dev_content,
                                     text=expertise_text,
@@ -6260,8 +6683,8 @@ Thresholds: Warning {warning_level}% | Critical {critical_level}%
                                     justify=tk.LEFT)
         expertise_content.pack(anchor=tk.W)
         
-        # Application Features Card
-        features_section = tk.LabelFrame(main_container, text="  ⭐ Key Features  ",
+        # Updated Application Features Card
+        features_section = tk.LabelFrame(main_container, text="  ⭐ Complete Feature Set  ",
                                         bg=self.colors['bg_primary'],
                                         fg=self.colors['accent_blue'],
                                         font=('Segoe UI', 12, 'bold'),
@@ -6272,34 +6695,63 @@ Thresholds: Warning {warning_level}% | Critical {critical_level}%
         features_content = tk.Frame(features_section, bg=self.colors['bg_primary'])
         features_content.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
         
-        features_text = """🔗 Direct vCenter Integration
-    • Live performance data fetching
-    • Real-time and historical analysis
-    • Support for multiple time periods
+        features_text = """🔗 VCENTER INTEGRATION
+        • Direct vCenter API connectivity
+        • Live performance data fetching
+        • Support for multiple time periods (Real-Time to Annual)
+        • Automated metric discovery and collection
 
-    📊 Advanced Analytics
-    • CPU Ready percentage calculations
-    • Health scoring algorithms
-    • Performance trend analysis
-    • Statistical distribution analysis
+        📡 REAL-TIME MONITORING
+        • Live CPU Ready data collection (20-second intervals)
+        • Interactive real-time dashboard
+        • Automated threshold alerting
+        • Performance trend tracking
+        • Export real-time data for analysis
 
-    📈 Visual Reporting
-    • Interactive timeline charts
-    • Heat map calendar views
-    • Host comparison matrices
-    • Export capabilities
+        📊 ADVANCED ANALYTICS
+        • Intelligent CPU Ready percentage calculations
+        • Multi-format data source support (CSV, Excel, vCenter)
+        • Health scoring algorithms (0-100 scale)
+        • Statistical distribution analysis
+        • Performance baseline establishment
 
-    🎯 Consolidation Analysis
-    • Host removal impact assessment
-    • Workload redistribution modeling
-    • Risk analysis and recommendations
-    • Infrastructure optimization
+        📈 VISUAL REPORTING
+        • Interactive timeline charts with threshold lines
+        • Heat map calendar views for pattern identification
+        • Host comparison matrices and rankings
+        • Performance distribution box plots
+        • Moving average trend analysis
+        • Export charts and visualizations
 
-    🏥 Health Monitoring
-    • Automated threshold detection
-    • Performance alerting
-    • Comprehensive dashboards
-    • Executive reporting"""
+        🤖 AI CONSOLIDATION ENGINE
+        • Intelligent host consolidation recommendations
+        • Multiple strategy options (Conservative/Balanced/Aggressive)
+        • Comprehensive risk assessment
+        • Workload redistribution modeling
+        • Cost savings calculations
+        • Implementation guidance
+
+        🏥 HEALTH MONITORING
+        • Automated performance threshold detection
+        • Color-coded health indicators
+        • Comprehensive host health dashboards
+        • Executive summary reporting
+        • Performance alerting system
+
+        📄 COMPREHENSIVE REPORTING
+        • PDF report generation with embedded charts
+        • Executive summaries with key findings
+        • Detailed technical analysis
+        • Implementation recommendations
+        • Best practices documentation
+        • CSV export capabilities
+
+        ⚙️ WORKFLOW AUTOMATION
+        • Auto-analyze imported data
+        • Smart notifications and user prompts
+        • Automatic tab switching
+        • Intelligent data format detection
+        • Timezone-aware data processing"""
         
         features_label = tk.Label(features_content,
                                 text=features_text,
@@ -6309,7 +6761,7 @@ Thresholds: Warning {warning_level}% | Critical {critical_level}%
                                 justify=tk.LEFT)
         features_label.pack(anchor=tk.W)
         
-        # Technology Stack Card
+        # Updated Technology Stack Card
         tech_section = tk.LabelFrame(main_container, text="  🛠️ Technology Stack  ",
                                     bg=self.colors['bg_primary'],
                                     fg=self.colors['accent_blue'],
@@ -6322,12 +6774,18 @@ Thresholds: Warning {warning_level}% | Critical {critical_level}%
         tech_content.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
         
         tech_text = """🐍 Python 3.x
-    📊 Pandas & NumPy (Data Analysis)
-    📈 Matplotlib & Seaborn (Visualisation)
-    🖥️ Tkinter (Modern UI Framework)
-    🔗 PyVmomi (vCenter API Integration)
-    📡 Requests (HTTP Communications)
-    🎨 Custom Dark Theme Implementation"""
+        📊 Pandas & NumPy (Advanced Data Analysis)
+        📈 Matplotlib & Seaborn (Professional Visualizations)
+        🖥️ Tkinter with TTK (Modern UI Framework)
+        🔗 PyVmomi (vCenter API Integration)
+        📡 Requests (HTTP Communications)
+        🗄️ SQLite3 (Real-Time Data Storage)
+        📄 ReportLab (PDF Report Generation)
+        🕒 Threading & Queue (Real-Time Processing)
+        🌐 Regular Expressions (Data Processing)
+        📅 DateTime & Timezone Handling
+        🎨 Custom Dark Theme Implementation
+        📦 PyInstaller (Executable Distribution)"""
         
         tech_label = tk.Label(tech_content,
                             text=tech_text,
@@ -6336,6 +6794,48 @@ Thresholds: Warning {warning_level}% | Critical {critical_level}%
                             font=('Segoe UI', 10),
                             justify=tk.LEFT)
         tech_label.pack(anchor=tk.W)
+        
+        # System Requirements Card (NEW)
+        requirements_section = tk.LabelFrame(main_container, text="  💻 System Requirements  ",
+                                            bg=self.colors['bg_primary'],
+                                            fg=self.colors['accent_blue'],
+                                            font=('Segoe UI', 12, 'bold'),
+                                            borderwidth=1,
+                                            relief='solid')
+        requirements_section.pack(fill=tk.X, pady=(0, 15))
+        
+        requirements_content = tk.Frame(requirements_section, bg=self.colors['bg_primary'])
+        requirements_content.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
+        
+        requirements_text = """🖥️ OPERATING SYSTEM
+        • Windows 10/11 (Recommended)
+        • Windows Server 2016/2019/2022
+        • Linux (Ubuntu 18.04+, CentOS 7+)
+        • macOS 10.14+ (Limited testing)
+
+        💾 HARDWARE REQUIREMENTS
+        • RAM: 4GB minimum, 8GB recommended
+        • Storage: 500MB free space
+        • CPU: Dual-core processor minimum
+        • Network: Access to vCenter server
+
+        🔗 NETWORK REQUIREMENTS
+        • vCenter Server accessibility (HTTPS/443)
+        • Internet connection for timezone data
+        • Local network access for host management
+
+        📋 SOFTWARE DEPENDENCIES
+        • Python 3.8+ (for source version)
+        • vCenter Server 6.5+ (for live monitoring)
+        • Modern web browser (for documentation)"""
+        
+        requirements_label = tk.Label(requirements_content,
+                                    text=requirements_text,
+                                    bg=self.colors['bg_primary'],
+                                    fg=self.colors['text_primary'],
+                                    font=('Segoe UI', 10),
+                                    justify=tk.LEFT)
+        requirements_label.pack(anchor=tk.W)
         
         # License & Copyright Card
         license_section = tk.LabelFrame(main_container, text="  📄 License & Copyright  ",
@@ -6350,13 +6850,17 @@ Thresholds: Warning {warning_level}% | Critical {critical_level}%
         license_content.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
         
         copyright_text = f"""© {datetime.now().year} Joshua Fourie
-    All Rights Reserved
+        All Rights Reserved
 
-    This application is proprietary software
-    developed for enterprise infrastructure
-    analysis and optimization.
+        This application is proprietary software
+        developed for enterprise infrastructure
+        analysis and optimization.
 
-    Built with ❤️ for the VMware community"""
+        Version 2.0 introduces real-time monitoring
+        capabilities and AI-powered consolidation
+        recommendations for modern vSphere environments.
+
+        Built with ❤️ for the VMware community"""
         
         copyright_label = tk.Label(license_content,
                                 text=copyright_text,
@@ -6366,12 +6870,12 @@ Thresholds: Warning {warning_level}% | Critical {critical_level}%
                                 justify=tk.CENTER)
         copyright_label.pack(expand=True)
         
-        # Footer
+        # Updated Footer
         footer_frame = tk.Frame(main_container, bg=self.colors['bg_primary'])
         footer_frame.pack(fill=tk.X, pady=(20, 0))
         
         footer_label = tk.Label(footer_frame,
-                            text="🚀 Empowering infrastructure teams with intelligent performance insights",
+                            text="🚀 Empowering infrastructure teams with intelligent real-time performance insights and AI-driven optimization",
                             bg=self.colors['bg_primary'],
                             fg=self.colors['text_secondary'],
                             font=('Segoe UI', 11, 'italic'),

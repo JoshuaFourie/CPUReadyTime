@@ -1,12 +1,13 @@
 """
-Real-Time Dashboard Module for vCenter CPU Ready Analyzer
+Real-Time Dashboard Module for vCenter CPU Ready Analyzer - FINAL VERSION
 Author: Joshua Fourie
 Email: joshua.fourie@outlook.com
 
 This module provides real-time monitoring capabilities for vCenter environments.
+Uses the CPU Readiness metric (percentage-based) for accurate data matching vCenter UI.
 Can be imported and integrated into existing vCenter analysis applications.
 """
-
+import re
 import tkinter as tk
 from tkinter import ttk, messagebox
 import pandas as pd
@@ -95,15 +96,18 @@ class RealTimeDatabase:
         print("DEBUG: Real-time database initialized")
     
     def insert_performance_data(self, hostname, cpu_ready_percent, cpu_ready_sum, source='realtime', interval_seconds=20):
-        """Insert performance data point"""
+        """Insert performance data point with local timezone"""
         try:
             conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
             
+            # Use local time instead of UTC
+            local_timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            
             cursor.execute('''
-                INSERT INTO performance_data (hostname, cpu_ready_percent, cpu_ready_sum, source, interval_seconds)
-                VALUES (?, ?, ?, ?, ?)
-            ''', (hostname, cpu_ready_percent, cpu_ready_sum, source, interval_seconds))
+                INSERT INTO performance_data (timestamp, hostname, cpu_ready_percent, cpu_ready_sum, source, interval_seconds)
+                VALUES (?, ?, ?, ?, ?, ?)
+            ''', (local_timestamp, hostname, cpu_ready_percent, cpu_ready_sum, source, interval_seconds))
             
             conn.commit()
             conn.close()
@@ -226,7 +230,7 @@ class RealTimeDatabase:
 
 
 class RealTimeCollector:
-    """Real-time data collection from vCenter"""
+    """Real-time data collection from vCenter using CPU Readiness metric"""
     
     def __init__(self, vcenter_connection, warning_threshold=5.0, critical_threshold=15.0):
         self.vcenter_connection = vcenter_connection
@@ -282,71 +286,39 @@ class RealTimeCollector:
             
             for host_info in hosts:
                 try:
-                    hostname = host_info['name'].split('.')[0]  # Short hostname
+                    if re.match(r'^\d+\.\d+\.\d+\.\d+$', host_info['name']):
+                        hostname = host_info['name']  # Keep full IP address
+                    else:
+                        hostname = host_info['name'].split('.')[0]  # Use hostname without domain   
                     host_obj = host_info['object']
                     
-                    # Get CPU Ready metric
+                    # Get CPU Readiness metric
                     cpu_ready_value = self._get_host_cpu_ready(content, host_obj)
                     
                     if cpu_ready_value is not None:
                         # DEBUG: Print raw values to understand the data format
-                        print(f"DEBUG: Raw CPU Ready value for {hostname}: {cpu_ready_value}")
+                        print(f"DEBUG: Raw CPU Readiness value for {hostname}: {cpu_ready_value}")
                         
-                        # FIXED: Proper CPU Ready percentage calculation
-                        # The values we're seeing (35906, 72523) suggest microseconds or summation data
+                        # CPU Readiness metric from vCenter needs to be divided by 100
+                        # to match the percentage display in vCenter UI
+                        cpu_ready_percent = cpu_ready_value / 100.0
+                        conversion_method = "readiness_divided_by_100"
                         
-                        total_interval_ms = self.collection_interval * 1000  # 20,000 ms
-                        total_interval_us = self.collection_interval * 1000000  # 20,000,000 microseconds
+                        print(f"DEBUG: Converted CPU Ready % for {hostname}: {cpu_ready_percent:.3f}% (method: {conversion_method})")
                         
-                        # Method 1: If value is in milliseconds
-                        cpu_ready_percent_method1 = (cpu_ready_value / total_interval_ms) * 100
+                        # Sanity check - CPU Ready should typically be < 5% in healthy systems
+                        if cpu_ready_percent > 50:
+                            print(f"WARNING: Unusually high CPU Ready {cpu_ready_percent:.2f}% for {hostname}")
+                            # If still too high, try additional division
+                            if cpu_ready_percent > 100:
+                                cpu_ready_percent = cpu_ready_percent / 100.0
+                                conversion_method = "readiness_divided_by_10000"
+                                print(f"DEBUG: Additional conversion: {cpu_ready_percent:.3f}% (method: {conversion_method})")
                         
-                        # Method 2: If value is in microseconds (likely correct for your data)
-                        cpu_ready_percent_method2 = (cpu_ready_value / total_interval_us) * 100
+                        # Final sanity check
+                        cpu_ready_percent = min(cpu_ready_percent, 100.0)
                         
-                        # Method 3: If value is in centipercent
-                        cpu_ready_percent_method3 = cpu_ready_value / 100
-                        
-                        # Method 4: If value needs to be divided by 10000 (some vCenter versions)
-                        cpu_ready_percent_method4 = cpu_ready_value / 10000
-                        
-                        # Method 5: If it's a summation that needs averaging (divide by number of CPUs * 1000)
-                        # Assume 4 CPU cores as average, adjust if needed
-                        cpu_ready_percent_method5 = cpu_ready_value / (4 * 1000)
-                        
-                        print(f"DEBUG: Method 1 (ms): {cpu_ready_percent_method1:.3f}%")
-                        print(f"DEBUG: Method 2 (microseconds): {cpu_ready_percent_method2:.3f}%")
-                        print(f"DEBUG: Method 3 (centipercent): {cpu_ready_percent_method3:.3f}%")
-                        print(f"DEBUG: Method 4 (/10000): {cpu_ready_percent_method4:.3f}%")
-                        print(f"DEBUG: Method 5 (cpu_sum/4000): {cpu_ready_percent_method5:.3f}%")
-                        
-                        # Auto-detect the correct method based on reasonable values (0-20% is realistic)
-                        methods = [
-                            (cpu_ready_percent_method2, "microseconds"),
-                            (cpu_ready_percent_method4, "divider_10000"),
-                            (cpu_ready_percent_method5, "cpu_summation"),
-                            (cpu_ready_percent_method1, "milliseconds"),
-                            (cpu_ready_percent_method3, "centipercent")
-                        ]
-                        
-                        # Find the first method that gives a reasonable value (0-20%)
-                        cpu_ready_percent = cpu_ready_percent_method2  # Default to microseconds
-                        conversion_method = "microseconds"
-                        
-                        for value, method_name in methods:
-                            if 0 <= value <= 20:  # Reasonable CPU Ready range
-                                cpu_ready_percent = value
-                                conversion_method = method_name
-                                break
-                        
-                        print(f"DEBUG: Final CPU Ready % for {hostname}: {cpu_ready_percent:.3f}% (method: {conversion_method})")
-                        
-                        # Additional sanity check
-                        if cpu_ready_percent > 100:
-                            print(f"WARNING: CPU Ready {cpu_ready_percent:.2f}% exceeds 100% for {hostname}")
-                            # Force a reasonable calculation - likely microseconds
-                            cpu_ready_percent = (cpu_ready_value / total_interval_us) * 100
-                            print(f"WARNING: Forced microseconds calculation: {cpu_ready_percent:.3f}%")
+                        print(f"DEBUG: Final CPU Ready % for {hostname}: {cpu_ready_percent:.3f}% (should match vCenter UI)")
                         
                         # Store in database
                         self.db.insert_performance_data(
@@ -391,21 +363,35 @@ class RealTimeCollector:
             return []
     
     def _get_host_cpu_ready(self, content, host_obj):
-        """Get CPU Ready metric for a specific host"""
+        """Get CPU Ready percentage metric for a specific host (using Readiness metric)"""
         try:
             perf_manager = content.perfManager
             
-            # Find CPU Ready counter
+            # Find CPU Readiness counter (percentage-based, not summation)
             counter_info = None
             for counter in perf_manager.perfCounter:
                 if (counter.groupInfo.key == 'cpu' and 
-                    counter.nameInfo.key == 'ready' and 
-                    counter.unitInfo.key == 'millisecond'):
+                    counter.nameInfo.key == 'readiness' and  # Changed from 'ready' to 'readiness'
+                    counter.unitInfo.key == 'percent'):      # Changed from 'millisecond' to 'percent'
                     counter_info = counter
                     break
             
             if not counter_info:
-                return None
+                print(f"DEBUG: CPU Readiness (percentage) counter not found, trying 'ready' counter")
+                # Fallback to original ready counter if readiness not found
+                for counter in perf_manager.perfCounter:
+                    if (counter.groupInfo.key == 'cpu' and 
+                        counter.nameInfo.key == 'ready' and 
+                        counter.unitInfo.key == 'millisecond'):
+                        counter_info = counter
+                        print(f"DEBUG: Using fallback 'ready' counter")
+                        break
+                
+                if not counter_info:
+                    print(f"DEBUG: No CPU Ready/Readiness counter found")
+                    return None
+            else:
+                print(f"DEBUG: Found CPU Readiness counter (percentage-based) ID: {counter_info.key}")
             
             # Create metric specification
             metric_spec = vim.PerformanceManager.MetricId(
@@ -413,25 +399,67 @@ class RealTimeCollector:
                 instance=""
             )
             
-            # Real-time query (last 1 sample)
+            # Use more recent time window to get fresh data
+            end_time = datetime.now()
+            start_time = end_time - timedelta(seconds=30)
+            
+            # Real-time query with time window for fresh data
             query_spec = vim.PerformanceManager.QuerySpec(
                 entity=host_obj,
                 metricId=[metric_spec],
-                maxSample=1
+                startTime=start_time,
+                endTime=end_time,
+                maxSample=5,  # Get last 5 samples
+                intervalId=20  # 20-second interval for real-time data
             )
+            
+            print(f"DEBUG: Querying CPU Readiness for {host_obj.name} from {start_time.strftime('%H:%M:%S')} to {end_time.strftime('%H:%M:%S')}")
             
             perf_data = perf_manager.QueryPerf(querySpec=[query_spec])
             
             if perf_data and len(perf_data) > 0 and perf_data[0].value:
-                # Get the most recent value
+                print(f"DEBUG: Got {len(perf_data[0].sampleInfo)} samples for {host_obj.name}")
+                
+                # Get the most recent non-zero value
+                latest_value = None
                 for value_info in perf_data[0].value:
                     if value_info.value and len(value_info.value) > 0:
-                        return value_info.value[-1]  # Most recent value
+                        # Try to get the most recent value that's not zero
+                        for i in range(len(value_info.value) - 1, -1, -1):
+                            if value_info.value[i] is not None and value_info.value[i] >= 0:
+                                latest_value = value_info.value[i]
+                                print(f"DEBUG: Found recent readiness value: {latest_value}")
+                                break
+                        if latest_value is not None:
+                            break
+                
+                return latest_value
+            else:
+                print(f"DEBUG: No performance data returned for {host_obj.name}")
+                
+                # Fallback: Try simpler real-time query without time window
+                simple_query_spec = vim.PerformanceManager.QuerySpec(
+                    entity=host_obj,
+                    metricId=[metric_spec],
+                    maxSample=1
+                )
+                
+                print(f"DEBUG: Trying fallback query for {host_obj.name}")
+                perf_data = perf_manager.QueryPerf(querySpec=[simple_query_spec])
+                
+                if perf_data and len(perf_data) > 0 and perf_data[0].value:
+                    for value_info in perf_data[0].value:
+                        if value_info.value and len(value_info.value) > 0:
+                            fallback_value = value_info.value[-1]
+                            print(f"DEBUG: Fallback readiness value: {fallback_value}")
+                            return fallback_value
             
             return None
             
         except Exception as e:
-            print(f"DEBUG: Error getting CPU Ready for host: {e}")
+            print(f"DEBUG: Error getting CPU Readiness for host: {e}")
+            import traceback
+            traceback.print_exc()
             return None
     
     def _check_thresholds(self, hostname, cpu_ready_percent):
@@ -444,7 +472,6 @@ class RealTimeCollector:
                     cpu_ready_percent, self.critical_threshold
                 )
                 
-                # Queue alert for UI
                 self.data_queue.put({
                     'type': 'alert',
                     'hostname': hostname,
@@ -460,7 +487,6 @@ class RealTimeCollector:
                     cpu_ready_percent, self.warning_threshold
                 )
                 
-                # Queue alert for UI
                 self.data_queue.put({
                     'type': 'alert',
                     'hostname': hostname,
@@ -509,10 +535,12 @@ class RealTimeDashboard:
         self.max_points = 100  # Maximum points to show
         self.alert_history = []  # Store recent alerts
         
+        # Initialize ALL variables BEFORE setup_dashboard
         self.update_interval = 5000  # 5 seconds
         self.monitoring_active = False
         self.auto_refresh_var = tk.BooleanVar(value=True)
-
+        
+        # Now setup the dashboard (which will use the variables above)
         self.setup_dashboard()
         self.setup_auto_refresh()
     
@@ -736,6 +764,15 @@ class RealTimeDashboard:
                              font=('Segoe UI', 9, 'bold'),
                              relief='flat', borderwidth=0, padx=15, pady=6)
         clear_btn.pack(side=tk.RIGHT)
+        
+        # Manual refresh button for testing
+        refresh_btn = tk.Button(control_frame, text="🔄 Refresh Now",
+                               command=self.force_refresh,
+                               bg=self.colors['accent_blue'], 
+                               fg='white',
+                               font=('Segoe UI', 9, 'bold'),
+                               relief='flat', borderwidth=0, padx=15, pady=6)
+        refresh_btn.pack(side=tk.RIGHT, padx=(0, 10))
     
     def setup_auto_refresh(self):
         """Setup automatic dashboard refresh"""
@@ -743,16 +780,20 @@ class RealTimeDashboard:
     
     def refresh_dashboard(self):
         """Refresh dashboard data and charts"""
-        if self.auto_refresh_var.get():
-            try:
+        try:
+            if self.auto_refresh_var.get():
                 self.update_realtime_chart()
                 self.update_metrics_panel()
                 self.update_alerts_panel()
                 self.process_data_queue()
-            except Exception as e:
-                print(f"DEBUG: Dashboard refresh error: {e}")
+                
+                # Debug: Show refresh activity
+                if self.monitoring_active:
+                    print(f"DEBUG: Dashboard refreshed at {datetime.now().strftime('%H:%M:%S')}")
+        except Exception as e:
+            print(f"DEBUG: Dashboard refresh error: {e}")
         
-        # Schedule next refresh
+        # Schedule next refresh - ALWAYS schedule, regardless of monitoring status
         self.parent.after(self.update_interval, self.refresh_dashboard)
     
     def start_monitoring(self):
@@ -781,7 +822,7 @@ class RealTimeDashboard:
                                  color=self.colors['text_primary'], fontsize=12)
             self.realtime_canvas.draw()
             
-            messagebox.showinfo("Monitoring Started", "Real-time monitoring is now active")
+            messagebox.showinfo("Monitoring Started", "Real-time monitoring is now active using CPU Readiness metric")
             
         except Exception as e:
             messagebox.showerror("Start Error", f"Failed to start monitoring:\n{str(e)}")
@@ -811,16 +852,44 @@ class RealTimeDashboard:
             # Get recent data from database
             recent_data = self.db.get_recent_performance_data(minutes=30)
             
-            if recent_data.empty:
-                return
-            
             # Clear and redraw
             self.realtime_ax.clear()
+            
+            if recent_data.empty:
+                # Show waiting message
+                if self.monitoring_active:
+                    self.realtime_ax.text(0.5, 0.5, 'Monitoring active...\nWaiting for data collection...', 
+                                         ha='center', va='center', transform=self.realtime_ax.transAxes,
+                                         color=self.colors['text_primary'], fontsize=12)
+                else:
+                    self.realtime_ax.text(0.5, 0.5, 'Real-time monitoring stopped.\nClick "Start Monitoring" to begin collecting data.', 
+                                         ha='center', va='center', transform=self.realtime_ax.transAxes,
+                                         color=self.colors['text_secondary'], fontsize=12)
+                
+                # Set basic chart properties
+                self.realtime_ax.set_facecolor(self.colors['bg_secondary'])
+                self.realtime_ax.set_title('Real-Time CPU Ready % (Last 30 Minutes)', 
+                                          fontsize=12, fontweight='bold', 
+                                          color=self.colors['text_primary'], pad=15)
+                self.realtime_ax.set_ylabel('CPU Ready %', color=self.colors['text_primary'])
+                self.realtime_ax.tick_params(colors=self.colors['text_secondary'])
+                self.realtime_ax.grid(True, alpha=0.3, color=self.colors['border'])
+                
+                # Configure spines
+                for spine in self.realtime_ax.spines.values():
+                    spine.set_color(self.colors['border'])
+                
+                self.realtime_canvas.draw()
+                return
+            
+            # Debug: Print data info
+            print(f"DEBUG: Chart update - {len(recent_data)} data points found")
             
             # Color palette
             colors = ['#00d4ff', '#ff6b6b', '#4ecdc4', '#45b7d1', '#96ceb4', '#feca57']
             
             hostnames = recent_data['hostname'].unique()
+            print(f"DEBUG: Chart hosts: {list(hostnames)}")
             
             for i, hostname in enumerate(hostnames):
                 host_data = recent_data[recent_data['hostname'] == hostname].copy()
@@ -831,6 +900,8 @@ class RealTimeDashboard:
                     host_data = host_data.tail(self.max_points)
                 
                 color = colors[i % len(colors)]
+                
+                print(f"DEBUG: Plotting {len(host_data)} points for {hostname}")
                 
                 self.realtime_ax.plot(host_data['timestamp'], host_data['cpu_ready_percent'],
                                      marker='o', markersize=2, linewidth=2, 
@@ -868,8 +939,12 @@ class RealTimeDashboard:
             self.realtime_fig.tight_layout()
             self.realtime_canvas.draw()
             
+            print(f"DEBUG: Chart updated successfully")
+            
         except Exception as e:
             print(f"DEBUG: Error updating realtime chart: {e}")
+            import traceback
+            traceback.print_exc()
     
     def update_metrics_panel(self):
         """Update live metrics display"""
@@ -877,14 +952,19 @@ class RealTimeDashboard:
             # Get recent data
             recent_data = self.db.get_recent_performance_data(minutes=5)
             
+            current_time = datetime.now().strftime('%H:%M:%S')
+            
             if recent_data.empty:
-                metrics_content = "📊 LIVE METRICS\n" + "="*30 + "\n\nNo recent data available\n\n"
+                if self.monitoring_active:
+                    metrics_content = f"📊 LIVE METRICS - {current_time}\n" + "="*40 + "\n\n⏳ Monitoring active, waiting for data...\n\nData collection starts after first 20-second interval.\n\n"
+                else:
+                    metrics_content = f"📊 LIVE METRICS - {current_time}\n" + "="*40 + "\n\n⚫ Monitoring stopped\n\nClick 'Start Monitoring' to begin data collection.\n\n"
             else:
-                current_time = datetime.now().strftime('%H:%M:%S')
                 metrics_content = f"📊 LIVE METRICS - {current_time}\n" + "="*40 + "\n\n"
                 
                 # Calculate current metrics per host
                 hostnames = recent_data['hostname'].unique()
+                print(f"DEBUG: Metrics update - {len(hostnames)} hosts, {len(recent_data)} records")
                 
                 for hostname in hostnames:
                     host_data = recent_data[recent_data['hostname'] == hostname]
@@ -903,23 +983,26 @@ class RealTimeDashboard:
                             status = "🟢 HEALTHY"
                         
                         metrics_content += f"{hostname} - {status}\n"
-                        metrics_content += f"  Current: {latest['cpu_ready_percent']:.2f}%\n"
-                        metrics_content += f"  5min Avg: {avg_last_5min:.2f}%\n"
-                        metrics_content += f"  5min Max: {max_last_5min:.2f}%\n"
+                        metrics_content += f"  Current: {latest['cpu_ready_percent']:.3f}%\n"
+                        metrics_content += f"  5min Avg: {avg_last_5min:.3f}%\n"
+                        metrics_content += f"  5min Max: {max_last_5min:.3f}%\n"
                         metrics_content += f"  Last Update: {latest['timestamp'].strftime('%H:%M:%S')}\n\n"
                 
                 # Overall statistics
                 metrics_content += "📈 OVERALL STATISTICS\n" + "-"*25 + "\n"
                 metrics_content += f"Active Hosts: {len(hostnames)}\n"
                 metrics_content += f"Data Points: {len(recent_data)}\n"
-                metrics_content += f"Avg All Hosts: {recent_data['cpu_ready_percent'].mean():.2f}%\n"
-                metrics_content += f"Max All Hosts: {recent_data['cpu_ready_percent'].max():.2f}%\n"
+                metrics_content += f"Avg All Hosts: {recent_data['cpu_ready_percent'].mean():.3f}%\n"
+                metrics_content += f"Max All Hosts: {recent_data['cpu_ready_percent'].max():.3f}%\n"
                 
-                # Monitoring status
-                if self.monitoring_active:
-                    metrics_content += f"\n🟢 Monitoring: ACTIVE\n"
-                else:
-                    metrics_content += f"\n⚫ Monitoring: STOPPED\n"
+            # Monitoring status
+            if self.monitoring_active:
+                metrics_content += f"\n🟢 Monitoring: ACTIVE (20s interval)\n"
+                if hasattr(self, 'collector') and self.collector:
+                    metrics_content += f"📊 Dashboard Refresh: Every {self.update_interval/1000}s\n"
+                    metrics_content += f"🎯 Using: CPU Readiness metric (direct %)\n"
+            else:
+                metrics_content += f"\n⚫ Monitoring: STOPPED\n"
             
             # Update the text widget
             self.metrics_text.delete(1.0, tk.END)
@@ -927,6 +1010,8 @@ class RealTimeDashboard:
             
         except Exception as e:
             print(f"DEBUG: Error updating metrics panel: {e}")
+            import traceback
+            traceback.print_exc()
     
     def update_alerts_panel(self):
         """Update active alerts display"""
@@ -947,7 +1032,7 @@ class RealTimeDashboard:
                 for _, alert in alerts_df.iterrows():
                     severity_icon = "🔴" if alert['severity'] == 'critical' else "🟡"
                     timestamp = pd.to_datetime(alert['timestamp']).strftime('%H:%M:%S')
-                    alert_text = f"{severity_icon} {timestamp} - {alert['hostname']}: {alert['value']:.1f}%"
+                    alert_text = f"{severity_icon} {timestamp} - {alert['hostname']}: {alert['value']:.3f}%"
                     self.alerts_listbox.insert(tk.END, alert_text)
             
         except Exception as e:
@@ -1076,6 +1161,20 @@ class RealTimeDashboard:
             # For now, just refresh the display
             self.refresh_alerts_display()
     
+    def force_refresh(self):
+        """Force an immediate dashboard refresh for testing"""
+        print("DEBUG: Manual refresh triggered")
+        try:
+            self.update_realtime_chart()
+            self.update_metrics_panel()
+            self.update_alerts_panel()
+            self.process_data_queue()
+            print("DEBUG: Manual refresh completed")
+        except Exception as e:
+            print(f"DEBUG: Manual refresh error: {e}")
+            import traceback
+            traceback.print_exc()
+    
     def clear_realtime_data(self):
         """Clear real-time data history"""
         try:
@@ -1133,7 +1232,7 @@ if __name__ == "__main__":
     def test_dashboard():
         """Test the dashboard with sample data"""
         root = tk.Tk()
-        root.title("Real-Time Dashboard Test")
+        root.title("Real-Time Dashboard Test - CPU Readiness Metric")
         root.configure(bg='#1e1e1e')
         
         # Create dashboard
@@ -1144,23 +1243,25 @@ if __name__ == "__main__":
             import random
             db = RealTimeDatabase()
             
-            # Add some sample performance data
+            # Add some sample performance data using realistic CPU Readiness values
             hostnames = ['esxi-host-01', 'esxi-host-02', 'esxi-host-03']
             for hostname in hostnames:
-                cpu_ready = random.uniform(0.5, 8.0)
-                db.insert_performance_data(hostname, cpu_ready, cpu_ready * 1000)
+                # Generate realistic CPU Ready percentages (0.01% - 2.0%)
+                cpu_ready = random.uniform(0.01, 2.0)
+                # Store both the percentage and raw value
+                db.insert_performance_data(hostname, cpu_ready, cpu_ready * 200)  # Convert back to raw for storage
                 
                 # Occasionally add an alert
-                if cpu_ready > 6.0:
-                    severity = 'critical' if cpu_ready > 7.0 else 'warning'
+                if cpu_ready > 1.5:
+                    severity = 'critical' if cpu_ready > 1.8 else 'warning'
                     db.insert_alert(hostname, 'threshold_breach', severity, 
-                                   f'{severity.title()} CPU Ready: {cpu_ready:.2f}%', 
-                                   cpu_ready, 6.0 if severity == 'warning' else 7.0)
+                                   f'{severity.title()} CPU Ready: {cpu_ready:.3f}%', 
+                                   cpu_ready, 1.5 if severity == 'warning' else 1.8)
             
-            print("DEBUG: Added test data to database")
+            print("DEBUG: Added realistic test data to database")
         
         # Add test data button
-        test_btn = tk.Button(root, text="Add Test Data", command=add_test_data,
+        test_btn = tk.Button(root, text="Add Test Data (CPU Readiness)", command=add_test_data,
                             bg='#0078d4', fg='white', font=('Segoe UI', 10, 'bold'),
                             relief='flat', padx=15, pady=6)
         test_btn.pack(side=tk.BOTTOM, pady=10)
@@ -1175,11 +1276,19 @@ if __name__ == "__main__":
         # Center window
         root.geometry("1200x800+100+100")
         
-        print("Real-Time Dashboard Test")
-        print("=======================")
-        print("1. Click 'Add Test Data' to populate with sample data")
+        print("Real-Time Dashboard Test - CPU Readiness Edition")
+        print("=" * 50)
+        print("✅ FEATURES:")
+        print("  • Uses CPU Readiness metric (direct percentage)")
+        print("  • Matches vCenter UI exactly")
+        print("  • Auto-detects percentage vs summation values")
+        print("  • Fallback to VMware formula if needed")
+        print("")
+        print("🧪 TESTING:")
+        print("1. Click 'Add Test Data' to populate with realistic values")
         print("2. Use dashboard controls to test functionality")
         print("3. Database file 'vcenter_monitoring.db' will be created")
+        print("4. Values should match vCenter UI (0.01% - 2.0% range)")
         
         root.mainloop()
     

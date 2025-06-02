@@ -2,3 +2,4 @@
 /dist
 vcenter_monitoring.db
 vcenter_monitoring.db
+/__pycache__
