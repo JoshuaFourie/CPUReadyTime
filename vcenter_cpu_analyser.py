@@ -469,15 +469,19 @@ class ModernCPUAnalyzer:
             self.critical_threshold.trace('w', lambda *args: self.on_threshold_change())
 
     def fetch_vcenter_data(self):
-        """Fetch CPU Ready data from vCenter for all hosts with styled progress dialog and auto-flow"""
+        """Fetch CPU Ready data from vCenter for all hosts with styled progress dialog and auto-flow - FIXED TIME PERIOD"""
         if not self.vcenter_connection:
             messagebox.showerror("No Connection", "Please connect to vCenter first")
             return
         
-        # Get date range based on selected vCenter period
+        # Get date range based on selected vCenter period - FIXED
         start_date, end_date = self.get_vcenter_date_range()
         selected_period = self.vcenter_period_var.get()
         perf_interval = self.vcenter_intervals[selected_period]
+        
+        print(f"DEBUG: Selected period: {selected_period}")
+        print(f"DEBUG: Date range: {start_date} to {end_date}")
+        print(f"DEBUG: Performance interval: {perf_interval} seconds")
         
         # Create styled progress dialog
         progress_window = self.create_styled_popup_window("Fetching vCenter Data", 400, 150)
@@ -531,17 +535,21 @@ class ModernCPUAnalyzer:
                     messagebox.showwarning("No Hosts", "No ESXi hosts found in vCenter")
                     return
                 
-                cpu_ready_data = self.fetch_cpu_ready_metrics(content, hosts, start_date, end_date, perf_interval)
+                # FIXED: Pass the correct time period parameters
+                cpu_ready_data = self.fetch_cpu_ready_metrics(
+                    content, hosts, start_date, end_date, perf_interval, selected_period
+                )
                 
                 if cpu_ready_data:
                     df = pd.DataFrame(cpu_ready_data)
                     df['source_file'] = f'vCenter_{selected_period}_{start_date.strftime("%Y%m%d")}_{end_date.strftime("%Y%m%d")}'
+                    df['detected_interval'] = selected_period  # FIXED: Set the correct interval
                     
                     self.data_frames.append(df)
                     self.update_file_status()
                     self.update_data_preview()
                     
-                    # Auto-set the interval
+                    # Auto-set the interval - FIXED
                     self.interval_var.set(selected_period)
                     self.current_interval = selected_period
                     
@@ -577,6 +585,391 @@ class ModernCPUAnalyzer:
                 progress_window.destroy()
         
         threading.Thread(target=fetch_thread, daemon=True).start()
+
+    def create_complete_vcenter_section(self, parent):
+        """Create complete vCenter integration section with improved formatting - FIXED to include Real-Time"""
+        if not VCENTER_AVAILABLE:
+            # Show unavailable message
+            vcenter_section = tk.LabelFrame(parent, text="  ⚠️ vCenter Integration  ",
+                                        bg=self.colors['bg_primary'],
+                                        fg=self.colors['warning'],
+                                        font=('Segoe UI', 10, 'bold'),
+                                        borderwidth=1,
+                                        relief='solid')
+            vcenter_section.pack(fill=tk.X, padx=10, pady=5)
+            
+            warning_frame = tk.Frame(vcenter_section, bg=self.colors['bg_primary'])
+            warning_frame.pack(fill=tk.X, padx=10, pady=10)
+            
+            tk.Label(warning_frame, 
+                    text="⚠️ vCenter integration requires additional packages:",
+                    bg=self.colors['bg_primary'], 
+                    fg=self.colors['warning'],
+                    font=('Segoe UI', 10, 'bold')).pack(anchor=tk.W)
+            
+            tk.Label(warning_frame,
+                    text="pip install pyvmomi requests",
+                    bg=self.colors['bg_primary'],
+                    fg=self.colors['text_secondary'],
+                    font=('Consolas', 9)).pack(anchor=tk.W, pady=(5, 0))
+            return
+
+        # vCenter Available - Create full integration
+        vcenter_section = tk.LabelFrame(parent, text="  🔗 vCenter Integration  ",
+                                    bg=self.colors['bg_primary'],
+                                    fg=self.colors['accent_blue'],
+                                    font=('Segoe UI', 10, 'bold'),
+                                    borderwidth=1,
+                                    relief='solid')
+        vcenter_section.pack(fill=tk.X, padx=10, pady=5)
+        
+        vcenter_content = tk.Frame(vcenter_section, bg=self.colors['bg_primary'])
+        vcenter_content.pack(fill=tk.X, padx=10, pady=10)
+        
+        # Connection fields frame - all in one row
+        conn_frame = tk.Frame(vcenter_content, bg=self.colors['bg_primary'])
+        conn_frame.pack(fill=tk.X, pady=(0, 10))
+        
+        # Configure grid weights for proper resizing
+        conn_frame.columnconfigure(1, weight=2)  # vCenter Server gets more space
+        conn_frame.columnconfigure(3, weight=1)  # Username gets normal space
+        conn_frame.columnconfigure(5, weight=1)  # Password gets normal space
+        
+        # vCenter Server
+        tk.Label(conn_frame, text="vCenter Server:", 
+                bg=self.colors['bg_primary'], fg=self.colors['text_primary'],
+                font=('Segoe UI', 10)).grid(row=0, column=0, sticky=tk.W, padx=(0, 8))
+        
+        self.vcenter_host = tk.Entry(conn_frame, width=30,
+                                    bg=self.colors['input_bg'], 
+                                    fg=self.colors['text_primary'],
+                                    insertbackground=self.colors['text_primary'],
+                                    relief='flat', borderwidth=1,
+                                    font=('Segoe UI', 9))
+        self.vcenter_host.grid(row=0, column=1, sticky=(tk.W, tk.E), padx=(0, 15))
+        
+        # Username
+        tk.Label(conn_frame, text="Username:",
+                bg=self.colors['bg_primary'], fg=self.colors['text_primary'],
+                font=('Segoe UI', 10)).grid(row=0, column=2, sticky=tk.W, padx=(0, 8))
+        
+        self.vcenter_user = tk.Entry(conn_frame, width=25,
+                                    bg=self.colors['input_bg'],
+                                    fg=self.colors['text_primary'],
+                                    insertbackground=self.colors['text_primary'],
+                                    relief='flat', borderwidth=1,
+                                    font=('Segoe UI', 9))
+        self.vcenter_user.grid(row=0, column=3, sticky=(tk.W, tk.E), padx=(0, 15))
+        
+        # Password
+        tk.Label(conn_frame, text="Password:",
+                bg=self.colors['bg_primary'], fg=self.colors['text_primary'],
+                font=('Segoe UI', 10)).grid(row=0, column=4, sticky=tk.W, padx=(0, 8))
+        
+        self.vcenter_pass = tk.Entry(conn_frame, show="*", width=20,
+                                    bg=self.colors['input_bg'],
+                                    fg=self.colors['text_primary'],
+                                    insertbackground=self.colors['text_primary'],
+                                    relief='flat', borderwidth=1,
+                                    font=('Segoe UI', 9))
+        self.vcenter_pass.grid(row=0, column=5, sticky=(tk.W, tk.E), padx=(0, 15))
+        
+        # Connect button
+        self.connect_btn = tk.Button(conn_frame, text="🔌 Connect",
+                                    command=self.connect_vcenter,
+                                    bg=self.colors['accent_blue'], fg='white',
+                                    font=('Segoe UI', 9, 'bold'),
+                                    relief='flat', borderwidth=0,
+                                    padx=15, pady=6)
+        self.connect_btn.grid(row=0, column=6, padx=(0, 15))
+        
+        # Status label
+        self.vcenter_status = tk.Label(conn_frame, text="⚫ Disconnected",
+                                    bg=self.colors['bg_primary'],
+                                    fg=self.colors['error'],
+                                    font=('Segoe UI', 10))
+        self.vcenter_status.grid(row=0, column=7, sticky=tk.W)
+        
+        # Data fetch controls frame - second row
+        fetch_frame = tk.Frame(vcenter_content, bg=self.colors['bg_primary'])
+        fetch_frame.pack(fill=tk.X, pady=(5, 0))
+        
+        # Configure grid weights
+        fetch_frame.columnconfigure(1, weight=1)
+        
+        tk.Label(fetch_frame, text="Time Period:",
+                bg=self.colors['bg_primary'], fg=self.colors['text_primary'],
+                font=('Segoe UI', 10)).grid(row=0, column=0, sticky=tk.W, padx=(0, 8))
+        
+        # FIXED: Include Real-Time in vCenter time periods
+        self.vcenter_period_var = tk.StringVar(value="Last Day")
+        period_values = ["Real-Time", "Last Day", "Last Week", "Last Month", "Last Year"]  # Added Real-Time back
+        
+        # Create a styled dropdown using tk.OptionMenu
+        self.period_dropdown = tk.OptionMenu(fetch_frame, self.vcenter_period_var, *period_values)
+        self.period_dropdown.config(bg=self.colors['input_bg'],
+                                fg=self.colors['text_primary'],
+                                activebackground=self.colors['bg_accent'],
+                                activeforeground=self.colors['text_primary'],
+                                relief='flat', borderwidth=1,
+                                font=('Segoe UI', 9),
+                                width=12)
+        
+        # Style the dropdown menu
+        dropdown_menu = self.period_dropdown['menu']
+        dropdown_menu.config(bg=self.colors['bg_secondary'],
+                            fg=self.colors['text_primary'],
+                            activebackground=self.colors['accent_blue'],
+                            activeforeground='white',
+                            relief='flat',
+                            borderwidth=1)
+        
+        self.period_dropdown.grid(row=0, column=1, sticky=tk.W, padx=(0, 20))
+        
+        # Fetch button  
+        self.fetch_btn = tk.Button(fetch_frame, text="📊 Fetch Data",
+                                command=self.fetch_vcenter_data,
+                                bg=self.colors['bg_secondary'], fg=self.colors['text_primary'],
+                                font=('Segoe UI', 9, 'bold'),
+                                relief='flat', borderwidth=0,
+                                padx=15, pady=6,
+                                state='disabled')  # Disabled until connected
+        self.fetch_btn.grid(row=0, column=2, padx=(0, 15))
+        
+        # Date range display label
+        self.date_range_label = tk.Label(fetch_frame, text="",
+                                        bg=self.colors['bg_primary'],
+                                        fg=self.colors['text_secondary'],
+                                        font=('Segoe UI', 9, 'italic'))
+        self.date_range_label.grid(row=0, column=3, sticky=tk.W)
+        
+        # Update date range display initially
+        self.update_date_range_display()
+        
+        # Bind the period dropdown change event
+        self.vcenter_period_var.trace('w', lambda *args: self.update_date_range_display())
+
+    def update_date_range_display(self, event=None):
+        """Update date range label based on selected period - FIXED to include Real-Time"""
+        if not hasattr(self, 'date_range_label'):
+            return
+            
+        period = self.vcenter_period_var.get()
+        now = datetime.now()
+        
+        ranges = {
+            "Real-Time": (now - timedelta(hours=1), now),  # FIXED: Added Real-Time back
+            "Last Day": (now - timedelta(days=1), now),
+            "Last Week": (now - timedelta(weeks=1), now),
+            "Last Month": (now - timedelta(days=30), now),
+            "Last Year": (now - timedelta(days=365), now)
+        }
+        
+        if period in ranges:
+            start_time, end_time = ranges[period]
+            if period == "Real-Time":
+                range_text = f"(Last hour: {start_time.strftime('%H:%M')} - {end_time.strftime('%H:%M')})"
+            elif period in ["Last Day"]:
+                range_text = f"({start_time.strftime('%m/%d %H:%M')} - {end_time.strftime('%m/%d %H:%M')})"
+            else:
+                range_text = f"({start_time.strftime('%m/%d')} - {end_time.strftime('%m/%d')})"
+        else:
+            range_text = ""
+        
+        self.date_range_label.config(text=range_text)
+
+    def get_vcenter_date_range(self):
+        """Calculate start and end dates based on selected vCenter period - FIXED to include Real-Time"""
+        period = self.vcenter_period_var.get()
+        now = datetime.now()
+        
+        print(f"DEBUG: Getting date range for period: {period}")
+        
+        ranges = {
+            "Real-Time": (now - timedelta(hours=1), now),  # FIXED: Added Real-Time back
+            "Last Day": (now - timedelta(days=1), now),
+            "Last Week": (now - timedelta(weeks=1), now),
+            "Last Month": (now - timedelta(days=30), now),
+            "Last Year": (now - timedelta(days=365), now)
+        }
+        
+        start_time, end_time = ranges.get(period, ranges["Last Day"])
+        
+        print(f"DEBUG: Date range calculated: {start_time.date()} to {end_time.date()}")
+        
+        return start_time.date(), end_time.date()
+
+    def fetch_cpu_ready_metrics(self, content, hosts, start_date, end_date, interval_seconds, selected_period):
+        """Fetch CPU Ready metrics for all hosts with proper interval handling - FIXED TIME PERIOD USAGE"""
+        perf_manager = content.perfManager
+        cpu_ready_data = []
+        
+        print(f"DEBUG: Requesting data for period: {selected_period}")
+        print(f"DEBUG: Date range: {start_date} to {end_date}")
+        print(f"DEBUG: Interval: {interval_seconds} seconds")
+        
+        # Find CPU Ready metric
+        counter_info = None
+        for counter in perf_manager.perfCounter:
+            if (counter.groupInfo.key == 'cpu' and 
+                counter.nameInfo.key == 'ready' and 
+                counter.unitInfo.key == 'millisecond'):
+                counter_info = counter
+                print(f"DEBUG: Found CPU Ready counter ID: {counter.key}")
+                break
+        
+        if not counter_info:
+            raise Exception("CPU Ready metric not found in vCenter")
+        
+        # Get available performance intervals from vCenter
+        print("DEBUG: Checking available performance intervals...")
+        available_intervals = perf_manager.historicalInterval
+        print("DEBUG: Available historical intervals:")
+        for interval in available_intervals:
+            print(f"  - Key: {interval.key}, Name: {interval.name}, Period: {interval.samplingPeriod}s, Level: {interval.level}")
+        
+        # Convert dates to vCenter format - FIXED TIME RANGE CALCULATION
+        start_time = datetime.combine(start_date, datetime.min.time())
+        end_time = datetime.combine(end_date, datetime.max.time())
+        time_diff = (end_time - start_time).total_seconds()
+        
+        print(f"DEBUG: Time difference: {time_diff} seconds ({time_diff/3600:.1f} hours)")
+        print(f"DEBUG: Looking for interval close to: {interval_seconds} seconds")
+        
+        # FIXED: Better interval selection based on the selected period
+        selected_interval = None
+        use_realtime = False
+        
+        if selected_period == "Real-Time" or time_diff <= 3600:
+            print("DEBUG: Using real-time data approach")
+            selected_interval = None  # Real-time uses no intervalId
+            use_realtime = True
+        else:
+            # FIXED: Find the best matching interval from available historical intervals
+            best_interval = None
+            best_diff = float('inf')
+            
+            print(f"DEBUG: Looking for historical interval close to {interval_seconds} seconds")
+            
+            for interval in available_intervals:
+                # Calculate how close this interval's period is to what we want
+                period_diff = abs(interval.samplingPeriod - interval_seconds)
+                print(f"  - Checking interval {interval.key}: {interval.samplingPeriod}s (diff: {period_diff})")
+                
+                if period_diff < best_diff:
+                    best_diff = period_diff
+                    best_interval = interval
+                    print(f"    - New best match: {interval.key} (diff: {period_diff})")
+            
+            if best_interval:
+                selected_interval = best_interval.key
+                actual_interval = best_interval.samplingPeriod
+                print(f"DEBUG: Selected historical interval: Key={selected_interval}, Period={actual_interval}s, Name={best_interval.name}")
+                
+                # Update interval_seconds to match what vCenter actually uses
+                interval_seconds = actual_interval
+            else:
+                print("DEBUG: No suitable historical interval found, falling back to real-time")
+                selected_interval = None
+                use_realtime = True
+        
+        # Fetch data for each host
+        print(f"DEBUG: Fetching data for {len(hosts)} hosts using {'real-time' if use_realtime else f'historical interval {selected_interval}'}...")
+        
+        for host_info in hosts:
+            try:
+                host = host_info['object']
+                hostname = host_info['name']
+                print(f"DEBUG: Processing host: {hostname}")
+                
+                # Create metric specification
+                metric_spec = vim.PerformanceManager.MetricId(
+                    counterId=counter_info.key,
+                    instance=""  # Empty instance for aggregate data
+                )
+                
+                # Create the query specification - FIXED TIME RANGE
+                if use_realtime:
+                    # Real-time query - no intervalId specified, limited time range
+                    query_spec = vim.PerformanceManager.QuerySpec(
+                        entity=host,
+                        metricId=[metric_spec],
+                        maxSample=100,  # Limit for real-time
+                        startTime=start_time,
+                        endTime=end_time
+                    )
+                    print(f"DEBUG: Using real-time query for {hostname}")
+                else:
+                    # Historical query with proper intervalId and time range
+                    query_spec = vim.PerformanceManager.QuerySpec(
+                        entity=host,
+                        metricId=[metric_spec],
+                        intervalId=selected_interval,
+                        maxSample=1000,  # Allow more samples for historical data
+                        startTime=start_time,
+                        endTime=end_time
+                    )
+                    print(f"DEBUG: Using historical query for {hostname} with interval {selected_interval}")
+                
+                print(f"DEBUG: Executing query for {hostname} from {start_time} to {end_time}...")
+                
+                # Execute query
+                perf_data = perf_manager.QueryPerf(querySpec=[query_spec])
+                
+                if perf_data and len(perf_data) > 0:
+                    print(f"DEBUG: Query successful for {hostname}")
+                    
+                    if perf_data[0].value and len(perf_data[0].value) > 0:
+                        samples_found = len(perf_data[0].sampleInfo)
+                        print(f"DEBUG: Found {samples_found} samples for {hostname}")
+                        
+                        if samples_found == 0:
+                            print(f"DEBUG: No sample data for {hostname}")
+                            continue
+                        
+                        # Process the performance data
+                        for i, sample_info in enumerate(perf_data[0].sampleInfo):
+                            timestamp = sample_info.timestamp
+                            
+                            # Get CPU Ready value for this timestamp
+                            total_ready = 0
+                            for value_info in perf_data[0].value:
+                                if i < len(value_info.value) and value_info.value[i] is not None:
+                                    # FIXED: Don't exclude zero values - they are valid
+                                    if value_info.value[i] >= 0:  # Include zero values
+                                        total_ready += value_info.value[i]
+                            
+                            # Add data point (including zero values)
+                            cpu_ready_data.append({
+                                'Time': timestamp.isoformat() + 'Z',
+                                f'Ready for {hostname}': total_ready,
+                                'Hostname': hostname.split('.')[0]  # Short hostname
+                            })
+                            
+                            # Debug for first few samples
+                            if i < 3:
+                                print(f"DEBUG: Sample {i} for {hostname}: timestamp={timestamp}, total_ready={total_ready}")
+                    else:
+                        print(f"DEBUG: No values in performance data for {hostname}")
+                else:
+                    print(f"DEBUG: No performance data returned for {hostname}")
+                    
+            except Exception as e:
+                print(f"DEBUG: Error fetching data for host {hostname}: {e}")
+                continue
+        
+        print(f"DEBUG: Total records collected: {len(cpu_ready_data)}")
+        
+        if len(cpu_ready_data) == 0:
+            print("DEBUG: No data collected from any host!")
+            # Try to provide helpful information
+            print("DEBUG: Possible issues:")
+            print("  - Time range might be outside available data")
+            print("  - Selected interval might not have data")
+            print("  - Hosts might not have CPU Ready metrics enabled")
+            print("  - vCenter might not be collecting performance data")
+        
+        return cpu_ready_data
  
     def manual_calculate_and_switch(self):
         """Manual trigger for calculate and switch"""
@@ -3887,6 +4280,7 @@ class ModernCPUAnalyzer:
             
             # Method 4: Validation against expected intervals with ENHANCED daily check
             expected_intervals = {
+                "Real-Time": 20,      # 20 seconds
                 "Last Day": 300,      # 5 minutes
                 "Last Week": 1800,    # 30 minutes
                 "Last Month": 7200,   # 2 hours
@@ -4170,197 +4564,6 @@ class ModernCPUAnalyzer:
             return df['detected_interval'].iloc[0]
         return self.current_interval  # Fallback to current selection
        
-    def create_complete_vcenter_section(self, parent):
-        """Create complete vCenter integration section with improved formatting"""
-        if not VCENTER_AVAILABLE:
-            # Show unavailable message
-            vcenter_section = tk.LabelFrame(parent, text="  ⚠️ vCenter Integration  ",
-                                        bg=self.colors['bg_primary'],
-                                        fg=self.colors['warning'],
-                                        font=('Segoe UI', 10, 'bold'),
-                                        borderwidth=1,
-                                        relief='solid')
-            vcenter_section.pack(fill=tk.X, padx=10, pady=5)
-            
-            warning_frame = tk.Frame(vcenter_section, bg=self.colors['bg_primary'])
-            warning_frame.pack(fill=tk.X, padx=10, pady=10)
-            
-            tk.Label(warning_frame, 
-                    text="⚠️ vCenter integration requires additional packages:",
-                    bg=self.colors['bg_primary'], 
-                    fg=self.colors['warning'],
-                    font=('Segoe UI', 10, 'bold')).pack(anchor=tk.W)
-            
-            tk.Label(warning_frame,
-                    text="pip install pyvmomi requests",
-                    bg=self.colors['bg_primary'],
-                    fg=self.colors['text_secondary'],
-                    font=('Consolas', 9)).pack(anchor=tk.W, pady=(5, 0))
-            return
-
-        # vCenter Available - Create full integration
-        vcenter_section = tk.LabelFrame(parent, text="  🔗 vCenter Integration  ",
-                                    bg=self.colors['bg_primary'],
-                                    fg=self.colors['accent_blue'],
-                                    font=('Segoe UI', 10, 'bold'),
-                                    borderwidth=1,
-                                    relief='solid')
-        vcenter_section.pack(fill=tk.X, padx=10, pady=5)
-        
-        vcenter_content = tk.Frame(vcenter_section, bg=self.colors['bg_primary'])
-        vcenter_content.pack(fill=tk.X, padx=10, pady=10)
-        
-        # Connection fields frame - all in one row
-        conn_frame = tk.Frame(vcenter_content, bg=self.colors['bg_primary'])
-        conn_frame.pack(fill=tk.X, pady=(0, 10))
-        
-        # Configure grid weights for proper resizing
-        conn_frame.columnconfigure(1, weight=2)  # vCenter Server gets more space
-        conn_frame.columnconfigure(3, weight=1)  # Username gets normal space
-        conn_frame.columnconfigure(5, weight=1)  # Password gets normal space
-        
-        # vCenter Server
-        tk.Label(conn_frame, text="vCenter Server:", 
-                bg=self.colors['bg_primary'], fg=self.colors['text_primary'],
-                font=('Segoe UI', 10)).grid(row=0, column=0, sticky=tk.W, padx=(0, 8))
-        
-        self.vcenter_host = tk.Entry(conn_frame, width=30,
-                                    bg=self.colors['input_bg'], 
-                                    fg=self.colors['text_primary'],
-                                    insertbackground=self.colors['text_primary'],
-                                    relief='flat', borderwidth=1,
-                                    font=('Segoe UI', 9))
-        self.vcenter_host.grid(row=0, column=1, sticky=(tk.W, tk.E), padx=(0, 15))
-        
-        # Username
-        tk.Label(conn_frame, text="Username:",
-                bg=self.colors['bg_primary'], fg=self.colors['text_primary'],
-                font=('Segoe UI', 10)).grid(row=0, column=2, sticky=tk.W, padx=(0, 8))
-        
-        self.vcenter_user = tk.Entry(conn_frame, width=25,
-                                    bg=self.colors['input_bg'],
-                                    fg=self.colors['text_primary'],
-                                    insertbackground=self.colors['text_primary'],
-                                    relief='flat', borderwidth=1,
-                                    font=('Segoe UI', 9))
-        self.vcenter_user.grid(row=0, column=3, sticky=(tk.W, tk.E), padx=(0, 15))
-        
-        # Password
-        tk.Label(conn_frame, text="Password:",
-                bg=self.colors['bg_primary'], fg=self.colors['text_primary'],
-                font=('Segoe UI', 10)).grid(row=0, column=4, sticky=tk.W, padx=(0, 8))
-        
-        self.vcenter_pass = tk.Entry(conn_frame, show="*", width=20,
-                                    bg=self.colors['input_bg'],
-                                    fg=self.colors['text_primary'],
-                                    insertbackground=self.colors['text_primary'],
-                                    relief='flat', borderwidth=1,
-                                    font=('Segoe UI', 9))
-        self.vcenter_pass.grid(row=0, column=5, sticky=(tk.W, tk.E), padx=(0, 15))
-        
-        # Connect button
-        self.connect_btn = tk.Button(conn_frame, text="🔌 Connect",
-                                    command=self.connect_vcenter,
-                                    bg=self.colors['accent_blue'], fg='white',
-                                    font=('Segoe UI', 9, 'bold'),
-                                    relief='flat', borderwidth=0,
-                                    padx=15, pady=6)
-        self.connect_btn.grid(row=0, column=6, padx=(0, 15))
-        
-        # Status label
-        self.vcenter_status = tk.Label(conn_frame, text="⚫ Disconnected",
-                                    bg=self.colors['bg_primary'],
-                                    fg=self.colors['error'],
-                                    font=('Segoe UI', 10))
-        self.vcenter_status.grid(row=0, column=7, sticky=tk.W)
-        
-        # Data fetch controls frame - second row
-        fetch_frame = tk.Frame(vcenter_content, bg=self.colors['bg_primary'])
-        fetch_frame.pack(fill=tk.X, pady=(5, 0))
-        
-        # Configure grid weights
-        fetch_frame.columnconfigure(1, weight=1)
-        
-        tk.Label(fetch_frame, text="Time Period:",
-                bg=self.colors['bg_primary'], fg=self.colors['text_primary'],
-                font=('Segoe UI', 10)).grid(row=0, column=0, sticky=tk.W, padx=(0, 8))
-        
-        self.vcenter_period_var = tk.StringVar(value="Last Day")
-        period_values = list(self.vcenter_intervals.keys())
-        
-        # Create a styled dropdown using tk.OptionMenu
-        self.period_dropdown = tk.OptionMenu(fetch_frame, self.vcenter_period_var, *period_values)
-        self.period_dropdown.config(bg=self.colors['input_bg'],
-                                fg=self.colors['text_primary'],
-                                activebackground=self.colors['bg_accent'],
-                                activeforeground=self.colors['text_primary'],
-                                relief='flat', borderwidth=1,
-                                font=('Segoe UI', 9),
-                                width=12)
-        
-        # Style the dropdown menu
-        dropdown_menu = self.period_dropdown['menu']
-        dropdown_menu.config(bg=self.colors['bg_secondary'],
-                            fg=self.colors['text_primary'],
-                            activebackground=self.colors['accent_blue'],
-                            activeforeground='white',
-                            relief='flat',
-                            borderwidth=1)
-        
-        self.period_dropdown.grid(row=0, column=1, sticky=tk.W, padx=(0, 20))
-        
-        # Fetch button  
-        self.fetch_btn = tk.Button(fetch_frame, text="📊 Fetch Data",
-                                command=self.fetch_vcenter_data,
-                                bg=self.colors['bg_secondary'], fg=self.colors['text_primary'],
-                                font=('Segoe UI', 9, 'bold'),
-                                relief='flat', borderwidth=0,
-                                padx=15, pady=6,
-                                state='disabled')  # Disabled until connected
-        self.fetch_btn.grid(row=0, column=2, padx=(0, 15))
-        
-        # Date range display label
-        self.date_range_label = tk.Label(fetch_frame, text="",
-                                        bg=self.colors['bg_primary'],
-                                        fg=self.colors['text_secondary'],
-                                        font=('Segoe UI', 9, 'italic'))
-        self.date_range_label.grid(row=0, column=3, sticky=tk.W)
-        
-        # Update date range display initially
-        self.update_date_range_display()
-        
-        # Bind the period dropdown change event
-        self.vcenter_period_var.trace('w', lambda *args: self.update_date_range_display())
-
-    def update_date_range_display(self, event=None):
-        """Update date range label based on selected period"""
-        if not hasattr(self, 'date_range_label'):
-            return
-            
-        period = self.vcenter_period_var.get()
-        now = datetime.now()
-        
-        ranges = {
-            "Real-Time": (now - timedelta(hours=1), now),
-            "Last Day": (now - timedelta(days=1), now),
-            "Last Week": (now - timedelta(weeks=1), now),
-            "Last Month": (now - timedelta(days=30), now),
-            "Last Year": (now - timedelta(days=365), now)
-        }
-        
-        if period in ranges:
-            start_time, end_time = ranges[period]
-            if period == "Real-Time":
-                range_text = f"({start_time.strftime('%H:%M')} - {end_time.strftime('%H:%M')} today)"
-            elif period in ["Last Day"]:
-                range_text = f"({start_time.strftime('%m/%d %H:%M')} - {end_time.strftime('%m/%d %H:%M')})"
-            else:
-                range_text = f"({start_time.strftime('%m/%d')} - {end_time.strftime('%m/%d')})"
-        else:
-            range_text = ""
-        
-        self.date_range_label.config(text=range_text)
-
     def connect_vcenter(self):
         """Connect to vCenter server with proper error handling"""
         if not VCENTER_AVAILABLE:
@@ -4465,221 +4668,6 @@ class ModernCPUAnalyzer:
             
         except Exception as e:
             messagebox.showerror("Disconnect Error", f"Error disconnecting: {str(e)}")
-          
-    def fetch_cpu_ready_metrics(self, content, hosts, start_date, end_date, interval_seconds):
-        """Fetch CPU Ready metrics for all hosts with proper interval handling"""
-        perf_manager = content.perfManager
-        cpu_ready_data = []
-        
-        print(f"DEBUG: Requesting data from {start_date} to {end_date}")
-        print(f"DEBUG: Looking for interval: {interval_seconds} seconds")
-        
-        # Find CPU Ready metric
-        counter_info = None
-        for counter in perf_manager.perfCounter:
-            if (counter.groupInfo.key == 'cpu' and 
-                counter.nameInfo.key == 'ready' and 
-                counter.unitInfo.key == 'millisecond'):
-                counter_info = counter
-                print(f"DEBUG: Found CPU Ready counter ID: {counter.key}")
-                break
-        
-        if not counter_info:
-            raise Exception("CPU Ready metric not found in vCenter")
-        
-        # Get available performance intervals from vCenter
-        print("DEBUG: Checking available performance intervals...")
-        
-        # Query available intervals for historical data
-        available_intervals = perf_manager.historicalInterval
-        print("DEBUG: Available historical intervals:")
-        for interval in available_intervals:
-            print(f"  - Key: {interval.key}, Name: {interval.name}, Period: {interval.samplingPeriod}s, Level: {interval.level}")
-        
-        # Convert dates to vCenter format
-        start_time = datetime.combine(start_date, datetime.min.time())
-        end_time = datetime.combine(end_date, datetime.max.time())
-        time_diff = (end_time - start_time).total_seconds()
-        
-        print(f"DEBUG: Time difference: {time_diff} seconds ({time_diff/3600:.1f} hours)")
-        
-        # Determine the best interval to use based on available intervals and time range
-        selected_interval = None
-        
-        # For very recent data (last 1 hour), try real-time first
-        if time_diff <= 3600:
-            print("DEBUG: Using real-time data approach")
-            selected_interval = None  # Real-time uses no intervalId
-            use_realtime = True
-        else:
-            use_realtime = False
-            # Find the best matching interval from available historical intervals
-            best_interval = None
-            best_diff = float('inf')
-            
-            for interval in available_intervals:
-                # Calculate how close this interval's period is to what we want
-                period_diff = abs(interval.samplingPeriod - interval_seconds)
-                if period_diff < best_diff:
-                    best_diff = period_diff
-                    best_interval = interval
-            
-            if best_interval:
-                selected_interval = best_interval.key
-                print(f"DEBUG: Selected historical interval: Key={selected_interval}, Period={best_interval.samplingPeriod}s, Name={best_interval.name}")
-            else:
-                print("DEBUG: No suitable historical interval found, trying real-time")
-                selected_interval = None
-                use_realtime = True
-        
-        # Fetch data for each host
-        print(f"DEBUG: Fetching data for {len(hosts)} hosts...")
-        for host_info in hosts:
-            try:
-                host = host_info['object']
-                hostname = host_info['name']
-                print(f"DEBUG: Processing host: {hostname}")
-                
-                # Create metric specification
-                metric_spec = vim.PerformanceManager.MetricId(
-                    counterId=counter_info.key,
-                    instance=""  # Empty instance for aggregate data
-                )
-                
-                # Try to query available metrics for this specific host first
-                try:
-                    available_metrics = perf_manager.QueryAvailablePerfMetric(entity=host)
-                    cpu_ready_metrics = [m for m in available_metrics if m.counterId == counter_info.key]
-                    print(f"DEBUG: Found {len(cpu_ready_metrics)} CPU Ready metrics available for {hostname}")
-                    
-                    # If we have specific instances, use them
-                    if cpu_ready_metrics:
-                        metric_specs = []
-                        for metric in cpu_ready_metrics:
-                            metric_specs.append(vim.PerformanceManager.MetricId(
-                                counterId=counter_info.key,
-                                instance=metric.instance
-                            ))
-                    else:
-                        metric_specs = [metric_spec]
-                        
-                except Exception as e:
-                    print(f"DEBUG: Could not query available metrics for {hostname}: {e}")
-                    metric_specs = [metric_spec]
-                
-                # Create the query specification
-                if use_realtime:
-                    # Real-time query - no intervalId specified
-                    query_spec = vim.PerformanceManager.QuerySpec(
-                        entity=host,
-                        metricId=metric_specs,
-                        maxSample=20,  # Limit samples for real-time
-                        startTime=start_time,
-                        endTime=end_time
-                    )
-                    print(f"DEBUG: Using real-time query for {hostname}")
-                else:
-                    # Historical query with proper intervalId
-                    query_spec = vim.PerformanceManager.QuerySpec(
-                        entity=host,
-                        metricId=metric_specs,
-                        intervalId=selected_interval,
-                        maxSample=100,  # Limit samples to avoid timeouts
-                        startTime=start_time,
-                        endTime=end_time
-                    )
-                    print(f"DEBUG: Using historical query for {hostname} with interval {selected_interval}")
-                
-                print(f"DEBUG: Executing query for {hostname}...")
-                
-                # Execute query
-                perf_data = perf_manager.QueryPerf(querySpec=[query_spec])
-                
-                if perf_data and len(perf_data) > 0:
-                    print(f"DEBUG: Query successful for {hostname}")
-                    
-                    if perf_data[0].value and len(perf_data[0].value) > 0:
-                        print(f"DEBUG: Found {len(perf_data[0].sampleInfo)} samples for {hostname}")
-                        
-                        # Process the performance data
-                        for i, sample_info in enumerate(perf_data[0].sampleInfo):
-                            timestamp = sample_info.timestamp
-                            
-                            # Get CPU Ready value for this timestamp
-                            total_ready = 0
-                            for value_info in perf_data[0].value:
-                                if i < len(value_info.value) and value_info.value[i] is not None and value_info.value[i] >= 0:
-                                    total_ready += value_info.value[i]
-                            
-                            # Only add if we have actual data
-                            if total_ready > 0:
-                                cpu_ready_data.append({
-                                    'Time': timestamp.isoformat() + 'Z',
-                                    f'Ready for {hostname}': total_ready,
-                                    'Hostname': hostname.split('.')[0]  # Short hostname
-                                })
-                    else:
-                        print(f"DEBUG: No values in performance data for {hostname}")
-                else:
-                    print(f"DEBUG: No performance data returned for {hostname}")
-                    
-            except Exception as e:
-                print(f"DEBUG: Error fetching data for host {hostname}: {e}")
-                
-                # If the query failed, try a simpler approach
-                try:
-                    print(f"DEBUG: Trying fallback query approach for {hostname}...")
-                    
-                    # Simplest possible query - no time range, no interval
-                    simple_query_spec = vim.PerformanceManager.QuerySpec(
-                        entity=host,
-                        metricId=[vim.PerformanceManager.MetricId(counterId=counter_info.key, instance="")],
-                        maxSample=10
-                    )
-                    
-                    perf_data = perf_manager.QueryPerf(querySpec=[simple_query_spec])
-                    
-                    if perf_data and perf_data[0].value:
-                        print(f"DEBUG: Fallback query successful for {hostname}")
-                        for i, sample_info in enumerate(perf_data[0].sampleInfo):
-                            timestamp = sample_info.timestamp
-                            total_ready = 0
-                            for value_info in perf_data[0].value:
-                                if i < len(value_info.value) and value_info.value[i] is not None and value_info.value[i] >= 0:
-                                    total_ready += value_info.value[i]
-                            
-                            if total_ready > 0:
-                                cpu_ready_data.append({
-                                    'Time': timestamp.isoformat() + 'Z',
-                                    f'Ready for {hostname}': total_ready,
-                                    'Hostname': hostname.split('.')[0]
-                                })
-                    else:
-                        print(f"DEBUG: Fallback query also failed for {hostname}")
-                        
-                except Exception as e2:
-                    print(f"DEBUG: Fallback query also failed for {hostname}: {e2}")
-                
-                continue
-        
-        print(f"DEBUG: Total records collected: {len(cpu_ready_data)}")
-        return cpu_ready_data
-
-    def get_vcenter_date_range(self):
-        """Calculate start and end dates based on selected vCenter period"""
-        period = self.vcenter_period_var.get()
-        now = datetime.now()
-        
-        ranges = {
-            "Real-Time": (now - timedelta(hours=1), now),
-            "Last Day": (now - timedelta(days=1), now),
-            "Last Week": (now - timedelta(weeks=1), now),
-            "Last Month": (now - timedelta(days=30), now),
-            "Last Year": (now - timedelta(days=365), now)
-        }
-        
-        start_time, end_time = ranges.get(period, ranges["Last Day"])
-        return start_time.date(), end_time.date()
 
     def get_all_hosts(self, content):
         """Get all ESXi hosts from vCenter"""
@@ -4943,25 +4931,28 @@ class ModernCPUAnalyzer:
                         
                         # Data cleaning and validation
                         initial_rows = len(subset)
-                        
-                        # Remove rows with missing data
+
+                        # Remove rows with missing data (but keep zero values as they are valid)
                         subset = subset.dropna(subset=['Time', 'CPU_Ready_Sum'])
                         after_dropna = len(subset)
-                        
-                        # Remove zero values (typically indicates no CPU Ready data)
-                        subset = subset[subset['CPU_Ready_Sum'] != 0]
+
+                        # FIXED: Keep zero values as they are valid CPU Ready metrics
+                        # Zero CPU Ready means the VM/host had no CPU contention, which is valuable information
+                        # Only remove clearly invalid negative values
+                        subset = subset[subset['CPU_Ready_Sum'] >= 0]
                         valid_rows = len(subset)
-                        
-                        print(f"DEBUG: Host {hostname}: {initial_rows} initial → {after_dropna} after dropna → {valid_rows} valid rows")
-                        
+
+                        print(f"DEBUG: Host {hostname}: {initial_rows} initial → {after_dropna} after dropna → {valid_rows} valid rows (zeros preserved)")
+
                         if valid_rows == 0:
-                            warning_msg = f"No valid CPU Ready data for host {hostname}"
+                            warning_msg = f"No valid CPU Ready data for host {hostname} (all values were negative or missing)"
                             processing_warnings.append(warning_msg)
                             print(f"DEBUG: {warning_msg}")
                             continue
-                        
+
+                        # Only warn if we lost a significant amount of data due to negative values
                         if valid_rows < initial_rows * 0.5:
-                            warning_msg = f"Host {hostname}: Lost {initial_rows - valid_rows} of {initial_rows} rows during cleaning"
+                            warning_msg = f"Host {hostname}: Lost {initial_rows - valid_rows} of {initial_rows} rows (negative values removed, zeros preserved)"
                             processing_warnings.append(warning_msg)
                             print(f"DEBUG: {warning_msg}")
                         
