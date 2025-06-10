@@ -69,6 +69,7 @@ class ModernCPUAnalyzer:
         }
         
         self.vcenter_intervals = {
+            "Real-Time": 20,
             "Last Day": 300,
             "Last Week": 1800,
             "Last Month": 7200,
@@ -469,19 +470,20 @@ class ModernCPUAnalyzer:
             self.critical_threshold.trace('w', lambda *args: self.on_threshold_change())
 
     def fetch_vcenter_data(self):
-        """Fetch CPU Ready data from vCenter for all hosts with styled progress dialog and auto-flow - FIXED TIME PERIOD"""
+        """Fetch CPU Ready data from vCenter for all hosts with styled progress dialog and auto-flow - FIXED DATA MIXING"""
         if not self.vcenter_connection:
             messagebox.showerror("No Connection", "Please connect to vCenter first")
             return
         
-        # Get date range based on selected vCenter period - FIXED
+        # CRITICAL FIX: Clear previous data to prevent mixing
+        print(f"DEBUG: Clearing {len(self.data_frames)} previous dataframes to prevent data mixing")
+        self.data_frames = []
+        self.processed_data = None
+        
+        # Get date range based on selected vCenter period
         start_date, end_date = self.get_vcenter_date_range()
         selected_period = self.vcenter_period_var.get()
         perf_interval = self.vcenter_intervals[selected_period]
-        
-        print(f"DEBUG: Selected period: {selected_period}")
-        print(f"DEBUG: Date range: {start_date} to {end_date}")
-        print(f"DEBUG: Performance interval: {perf_interval} seconds")
         
         # Create styled progress dialog
         progress_window = self.create_styled_popup_window("Fetching vCenter Data", 400, 150)
@@ -493,7 +495,7 @@ class ModernCPUAnalyzer:
         
         # Title
         title_label = tk.Label(progress_content, 
-                            text="🔄 Fetching CPU Ready data from vCenter...",
+                            text=f"🔄 Fetching {selected_period} CPU Ready data from vCenter...",
                             bg=self.colors['bg_primary'],
                             fg=self.colors['text_primary'],
                             font=('Segoe UI', 11, 'bold'))
@@ -535,23 +537,25 @@ class ModernCPUAnalyzer:
                     messagebox.showwarning("No Hosts", "No ESXi hosts found in vCenter")
                     return
                 
-                # FIXED: Pass the correct time period parameters
-                cpu_ready_data = self.fetch_cpu_ready_metrics(
-                    content, hosts, start_date, end_date, perf_interval, selected_period
-                )
+                print(f"DEBUG: Fetching {selected_period} data for {len(hosts)} hosts")
+                cpu_ready_data = self.fetch_cpu_ready_metrics(content, hosts, start_date, end_date, perf_interval, selected_period)
                 
                 if cpu_ready_data:
                     df = pd.DataFrame(cpu_ready_data)
                     df['source_file'] = f'vCenter_{selected_period}_{start_date.strftime("%Y%m%d")}_{end_date.strftime("%Y%m%d")}'
-                    df['detected_interval'] = selected_period  # FIXED: Set the correct interval
+                    
+                    # IMPORTANT: Add the selected period to the dataframe for proper analysis
+                    df['selected_period'] = selected_period
+                    print(f"DEBUG: Created dataframe with {len(df)} records for {selected_period}")
                     
                     self.data_frames.append(df)
                     self.update_file_status()
                     self.update_data_preview()
                     
-                    # Auto-set the interval - FIXED
+                    # Auto-set the interval to match what was fetched
                     self.interval_var.set(selected_period)
                     self.current_interval = selected_period
+                    print(f"DEBUG: Set current interval to: {selected_period}")
                     
                     # Mark as successful for auto-flow
                     fetch_successful = True
@@ -562,7 +566,7 @@ class ModernCPUAnalyzer:
                     
                     # Show traditional success message first
                     messagebox.showinfo("Success", 
-                                    f"✅ Successfully fetched vCenter data!\n\n"
+                                    f"✅ Successfully fetched {selected_period} vCenter data!\n\n"
                                     f"📊 Period: {selected_period}\n"
                                     f"🖥️  Hosts: {len(hosts)}\n"
                                     f"📅 Date Range: {start_date} to {end_date}\n"
@@ -570,17 +574,17 @@ class ModernCPUAnalyzer:
                     
                     # AUTO-FLOW LOGIC - Execute after success message
                     if self.auto_analyze.get():
-                        self.show_smart_notification("vCenter data fetched! Auto-analyzing...", 2000)
+                        self.show_smart_notification(f"{selected_period} data fetched! Auto-analyzing...", 2000)
                         self.root.after(1500, self.auto_calculate_and_switch)
                     else:
-                        self.show_action_prompt("vCenter data ready! Analyze now?", 
+                        self.show_action_prompt(f"{selected_period} data ready! Analyze now?", 
                                             "🔍 Analyze", 
                                             self.manual_calculate_and_switch)
                 else:
                     messagebox.showwarning("No Data", f"No CPU Ready data found for {selected_period}")
                     
             except Exception as e:
-                messagebox.showerror("Fetch Error", f"Error fetching data from vCenter:\n{str(e)}")
+                messagebox.showerror("Fetch Error", f"Error fetching {selected_period} data from vCenter:\n{str(e)}")
             finally:
                 progress_window.destroy()
         
@@ -779,23 +783,24 @@ class ModernCPUAnalyzer:
         self.date_range_label.config(text=range_text)
 
     def get_vcenter_date_range(self):
-        """Calculate start and end dates based on selected vCenter period - FIXED to include Real-Time"""
+        """Calculate start and end dates based on selected vCenter period - FIXED"""
         period = self.vcenter_period_var.get()
         now = datetime.now()
         
-        print(f"DEBUG: Getting date range for period: {period}")
-        
+        # FIXED: Proper date ranges for each period
         ranges = {
-            "Real-Time": (now - timedelta(hours=1), now),  # FIXED: Added Real-Time back
-            "Last Day": (now - timedelta(days=1), now),
-            "Last Week": (now - timedelta(weeks=1), now),
-            "Last Month": (now - timedelta(days=30), now),
-            "Last Year": (now - timedelta(days=365), now)
+            "Real-Time": (now - timedelta(hours=1), now),      # 1 hour
+            "Last Day": (now - timedelta(days=1), now),        # 1 day  
+            "Last Week": (now - timedelta(weeks=1), now),      # 7 days
+            "Last Month": (now - timedelta(days=30), now),     # 30 days
+            "Last Year": (now - timedelta(days=365), now)      # 365 days
         }
         
         start_time, end_time = ranges.get(period, ranges["Last Day"])
         
-        print(f"DEBUG: Date range calculated: {start_time.date()} to {end_time.date()}")
+        # Debug output
+        time_span_hours = (end_time - start_time).total_seconds() / 3600
+        print(f"DEBUG: Date range for '{period}': {start_time.date()} to {end_time.date()} ({time_span_hours:.1f} hours)")
         
         return start_time.date(), end_time.date()
 
@@ -827,11 +832,37 @@ class ModernCPUAnalyzer:
         print("DEBUG: Available historical intervals:")
         for interval in available_intervals:
             print(f"  - Key: {interval.key}, Name: {interval.name}, Period: {interval.samplingPeriod}s, Level: {interval.level}")
+
+        # Debug vCenter version info
+        try:
+            about_info = content.about
+            print(f"DEBUG: vCenter version: {about_info.name} {about_info.version} (build {about_info.build})")
+        except:
+            print("DEBUG: Could not retrieve vCenter version info")
         
         # Convert dates to vCenter format - FIXED TIME RANGE CALCULATION
         start_time = datetime.combine(start_date, datetime.min.time())
         end_time = datetime.combine(end_date, datetime.max.time())
         time_diff = (end_time - start_time).total_seconds()
+        
+        # For vCenter 8.0+, adjust time ranges to avoid issues
+        vcenter_version = float('.'.join(content.about.version.split('.')[:2]))
+        if vcenter_version >= 8.0 and selected_period != "Real-Time":
+            # Reduce time range for better compatibility with vCenter 8.0+
+            if selected_period == "Last Day":
+                start_time = datetime.now() - timedelta(hours=24)
+                end_time = datetime.now()
+            elif selected_period == "Last Week":
+                start_time = datetime.now() - timedelta(days=7)
+                end_time = datetime.now()
+            elif selected_period == "Last Month":
+                start_time = datetime.now() - timedelta(days=30)
+                end_time = datetime.now()
+            elif selected_period == "Last Year":
+                start_time = datetime.now() - timedelta(days=365)
+                end_time = datetime.now()
+            
+            print(f"DEBUG: Adjusted time range for vCenter 8.0+: {start_time} to {end_time}")
         
         print(f"DEBUG: Time difference: {time_diff} seconds ({time_diff/3600:.1f} hours)")
         print(f"DEBUG: Looking for interval close to: {interval_seconds} seconds")
@@ -861,7 +892,7 @@ class ModernCPUAnalyzer:
                     best_interval = interval
                     print(f"    - New best match: {interval.key} (diff: {period_diff})")
             
-            if best_interval:
+            if best_interval and best_diff < interval_seconds:  # Only use if it's reasonably close
                 selected_interval = best_interval.key
                 actual_interval = best_interval.samplingPeriod
                 print(f"DEBUG: Selected historical interval: Key={selected_interval}, Period={actual_interval}s, Name={best_interval.name}")
@@ -869,7 +900,7 @@ class ModernCPUAnalyzer:
                 # Update interval_seconds to match what vCenter actually uses
                 interval_seconds = actual_interval
             else:
-                print("DEBUG: No suitable historical interval found, falling back to real-time")
+                print("DEBUG: No suitable historical interval found or too far from requested, falling back to real-time")
                 selected_interval = None
                 use_realtime = True
         
@@ -901,18 +932,43 @@ class ModernCPUAnalyzer:
                     print(f"DEBUG: Using real-time query for {hostname}")
                 else:
                     # Historical query with proper intervalId and time range
-                    query_spec = vim.PerformanceManager.QuerySpec(
-                        entity=host,
-                        metricId=[metric_spec],
-                        intervalId=selected_interval,
-                        maxSample=1000,  # Allow more samples for historical data
-                        startTime=start_time,
-                        endTime=end_time
-                    )
-                    print(f"DEBUG: Using historical query for {hostname} with interval {selected_interval}")
-                
+                    # Check vCenter version to determine query method
+                    vcenter_version = float('.'.join(content.about.version.split('.')[:2]))  # Extract major.minor version
+                    if vcenter_version >= 8.0:
+                        # vCenter 8.0+ - Don't use intervalId at all
+                        query_spec = vim.PerformanceManager.QuerySpec(
+                            entity=host,
+                            metricId=[metric_spec],
+                            maxSample=1000,
+                            startTime=start_time,
+                            endTime=end_time
+                        )
+                        print(f"DEBUG: Using vCenter 8.0+ compatible query (no intervalId)")
+                    else:
+                        # vCenter 7.x and below - Try with intervalId
+                        try:
+                            query_spec = vim.PerformanceManager.QuerySpec(
+                                entity=host,
+                                metricId=[metric_spec],
+                                intervalId=selected_interval,
+                                maxSample=1000,
+                                startTime=start_time,
+                                endTime=end_time
+                            )
+                            print(f"DEBUG: Using historical query with intervalId {selected_interval}")
+                        except:
+                            # Fallback for older vCenter versions
+                            query_spec = vim.PerformanceManager.QuerySpec(
+                                entity=host,
+                                metricId=[metric_spec],
+                                maxSample=1000,
+                                startTime=start_time,
+                                endTime=end_time
+                            )
+                            print(f"DEBUG: Fallback to query without intervalId")
+
                 print(f"DEBUG: Executing query for {hostname} from {start_time} to {end_time}...")
-                
+
                 # Execute query
                 perf_data = perf_manager.QueryPerf(querySpec=[query_spec])
                 
@@ -1587,7 +1643,7 @@ class ModernCPUAnalyzer:
             # Footer information
             story.append(Paragraph("📋 Report Details", subheading_style))
             footer_text = f"""
-            <b>Generated by:</b> vCenter CPU Ready Analyzer v2.0<br/>
+            <b>Generated by:</b> vCenter CPU Ready Analyzer v2.1<br/>
             <b>Report Generated:</b> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}<br/>
             <b>Analysis Method:</b> VMware vCenter Performance Data Analysis<br/>
             <b>Total Pages:</b> Multiple sections with visualizations<br/>
@@ -4844,7 +4900,7 @@ class ModernCPUAnalyzer:
             self.calculate_cpu_ready()
     
     def calculate_cpu_ready(self, auto_triggered=False):
-        """Calculate CPU Ready percentages with enhanced data processing and validation - COMPLETE UPDATED VERSION"""
+        """Calculate CPU Ready percentages using standard formulas for each interval"""
         if not self.data_frames:
             if not auto_triggered:
                 messagebox.showwarning("No Data", "Please import files or fetch data from vCenter first")
@@ -4867,6 +4923,19 @@ class ModernCPUAnalyzer:
             processing_warnings = []
             
             print(f"DEBUG: Starting analysis with {len(self.data_frames)} dataframes")
+            
+            # Standard divisors for each interval based on provided formula
+            interval_divisors = {
+                "Real-Time": 200,
+                "Last Day": 3000,
+                "Last Week": 18000,
+                "Last Month": 72000,
+                "Last Year": 864000
+            }
+            
+            # Get the appropriate divisor for the current interval
+            current_divisor = interval_divisors.get(self.current_interval, 3000)  # Default to Last Day if unknown
+            print(f"DEBUG: Using interval: {self.current_interval} with divisor {current_divisor}")
             
             # Process each dataframe
             for df_index, df in enumerate(self.data_frames):
@@ -4900,6 +4969,30 @@ class ModernCPUAnalyzer:
                     print(f"DEBUG: {warning_msg}")
                     continue
                 
+                # Detect if data is from direct vCenter API or from CSV export
+                is_vcenter_direct = False
+                if 'source_file' in df.columns:
+                    # Check if source is direct vCenter or imported CSV
+                    first_source = str(df['source_file'].iloc[0]).lower() if len(df) > 0 else ""
+                    is_vcenter_direct = "vcenter api" in first_source or "vcenter direct" in first_source
+                
+                # Check if there's a selected_period column (usually indicates direct vCenter API)
+                if 'selected_period' in df.columns:
+                    is_vcenter_direct = True
+                
+                # Additional detection method: sample data range
+                # For Real-Time: Check a sample of values to detect if they're in vCenter API range
+                if self.current_interval == "Real-Time" and len(df) > 5:
+                    sample_ready_col = ready_cols[0]
+                    sample_values = df[sample_ready_col].dropna().head(5)
+                    if len(sample_values) > 0:
+                        avg_sample = sample_values.mean()
+                        if avg_sample > 1000:  # vCenter API values for Real-Time are typically >1000
+                            is_vcenter_direct = True
+                            print(f"DEBUG: Detected vCenter API data based on value range (avg: {avg_sample:.2f})")
+                
+                print(f"DEBUG: Is direct vCenter API data: {is_vcenter_direct}")
+                
                 # Process each ready column (each represents a different host)
                 for ready_col in ready_cols:
                     print(f"DEBUG: Processing ready column: {ready_col}")
@@ -4932,29 +5025,31 @@ class ModernCPUAnalyzer:
                         # Data cleaning and validation
                         initial_rows = len(subset)
 
-                        # Remove rows with missing data (but keep zero values as they are valid)
+                        # Remove rows with missing data
                         subset = subset.dropna(subset=['Time', 'CPU_Ready_Sum'])
                         after_dropna = len(subset)
 
-                        # FIXED: Keep zero values as they are valid CPU Ready metrics
-                        # Zero CPU Ready means the VM/host had no CPU contention, which is valuable information
-                        # Only remove clearly invalid negative values
+                        # Only remove negative values (invalid) but keep zeros (valid)
                         subset = subset[subset['CPU_Ready_Sum'] >= 0]
                         valid_rows = len(subset)
 
-                        print(f"DEBUG: Host {hostname}: {initial_rows} initial → {after_dropna} after dropna → {valid_rows} valid rows (zeros preserved)")
+                        print(f"DEBUG: Host {hostname}: {initial_rows} initial → {after_dropna} after dropna → {valid_rows} valid rows")
 
+                        # Update the warning logic to be more specific
                         if valid_rows == 0:
-                            warning_msg = f"No valid CPU Ready data for host {hostname} (all values were negative or missing)"
+                            warning_msg = f"No valid CPU Ready data for host {hostname}"
                             processing_warnings.append(warning_msg)
                             print(f"DEBUG: {warning_msg}")
                             continue
 
-                        # Only warn if we lost a significant amount of data due to negative values
-                        if valid_rows < initial_rows * 0.5:
-                            warning_msg = f"Host {hostname}: Lost {initial_rows - valid_rows} of {initial_rows} rows (negative values removed, zeros preserved)"
+                        # Only warn if we lose a significant amount of data due to invalid values
+                        lost_rows = initial_rows - valid_rows
+                        if lost_rows > 0 and lost_rows > initial_rows * 0.1:  # Only warn if >10% lost
+                            warning_msg = f"Host {hostname}: Removed {lost_rows} invalid data points ({(lost_rows/initial_rows)*100:.1f}%)"
                             processing_warnings.append(warning_msg)
                             print(f"DEBUG: {warning_msg}")
+                        else:
+                            print(f"DEBUG: Host {hostname}: Kept all {valid_rows} valid data points (including {initial_rows - after_dropna} zeros)")
                         
                         # Enhanced timestamp processing
                         try:
@@ -4965,142 +5060,20 @@ class ModernCPUAnalyzer:
                             print(f"DEBUG: {warning_msg}")
                             continue
                         
-                        # ENHANCED CPU Ready calculation with intelligent data format detection
-                        interval_seconds = self.intervals[self.current_interval]
-                        print(f"DEBUG: Using interval: {self.current_interval} ({interval_seconds} seconds)")
-                        
-                        # Determine data source type
-                        source_file = subset['Source_File'].iloc[0] if 'Source_File' in subset.columns else "unknown"
-                        is_vcenter_data = 'vCenter' in source_file
-                        is_realtime = self.current_interval == "Real-Time"
-                        
-                        print(f"DEBUG: Source: {source_file}, vCenter: {is_vcenter_data}, Real-time: {is_realtime}")
-                        
-                        # Analyze sample values
-                        sample_values = subset['CPU_Ready_Sum'].head(20)
-                        avg_sample = sample_values.mean()
-                        max_sample = sample_values.max()
-                        min_sample = sample_values.min()
-                        
-                        print(f"DEBUG: Sample statistics - Min: {min_sample:.2f}, Max: {max_sample:.2f}, Avg: {avg_sample:.2f}")
-                        
-                        # REAL-TIME DATA HANDLING (Your working case)
-                        if is_realtime or self.current_interval == "Real-Time":
-                            print(f"DEBUG: Processing Real-Time data")
-                            
-                            if avg_sample <= 100 and max_sample <= 100:
-                                # Real-time data is often already in percentage or very close
-                                if avg_sample <= 1:
-                                    subset['CPU_Ready_Percent'] = subset['CPU_Ready_Sum']
-                                    conversion_applied = "realtime_direct"
-                                    print(f"DEBUG: Real-time direct percentage")
-                                else:
-                                    # Might be permille for real-time
-                                    subset['CPU_Ready_Percent'] = subset['CPU_Ready_Sum'] / 10
-                                    conversion_applied = "realtime_permille"
-                                    print(f"DEBUG: Real-time permille conversion")
-                            else:
-                                # Standard millisecond conversion for real-time
-                                max_possible_ms = interval_seconds * 1000  # 20 seconds = 20,000ms
-                                subset['CPU_Ready_Percent'] = (subset['CPU_Ready_Sum'] / max_possible_ms) * 100
-                                conversion_applied = "realtime_milliseconds"
-                                print(f"DEBUG: Real-time millisecond conversion (max possible: {max_possible_ms}ms)")
-                        
-                        # LAST DAY DATA HANDLING (Your problem case)
-                        elif self.current_interval == "Last Day":
-                            print(f"DEBUG: Processing Last Day data - applying conservative conversion")
-                            
-                            # Last Day data from vCenter is often problematic
-                            if avg_sample > 50000:  # Very high values
-                                # Treat as cumulative microseconds over the period
-                                subset['CPU_Ready_Percent'] = (subset['CPU_Ready_Sum'] / (interval_seconds * 100000)) * 100
-                                conversion_applied = "lastday_cumulative_microseconds"
-                                print(f"DEBUG: Last Day cumulative microseconds conversion")
-                                
-                            elif avg_sample > 10000:  # High values 
-                                # Conservative millisecond conversion
-                                subset['CPU_Ready_Percent'] = (subset['CPU_Ready_Sum'] / (interval_seconds * 10000)) * 100
-                                conversion_applied = "lastday_conservative_ms"
-                                print(f"DEBUG: Last Day conservative milliseconds")
-                                
-                            elif avg_sample > 1000:  # Moderate values
-                                # Treat as permille (per thousand)
-                                subset['CPU_Ready_Percent'] = subset['CPU_Ready_Sum'] / 1000
-                                conversion_applied = "lastday_permille"
-                                print(f"DEBUG: Last Day permille conversion")
-                                
-                            elif avg_sample > 100:  # Lower values
-                                # Treat as centipercent
-                                subset['CPU_Ready_Percent'] = subset['CPU_Ready_Sum'] / 100
-                                conversion_applied = "lastday_centipercent"
-                                print(f"DEBUG: Last Day centipercent conversion")
-                                
-                            else:  # Very low values
-                                # Might already be percentage or need minor conversion
-                                subset['CPU_Ready_Percent'] = subset['CPU_Ready_Sum'] / 10
-                                conversion_applied = "lastday_minor"
-                                print(f"DEBUG: Last Day minor conversion")
-                        
-                        # OTHER INTERVALS (Week, Month, Year)
+                        # CPU READY CALCULATION with data source detection
+                        if self.current_interval == "Real-Time" and is_vcenter_direct:
+                            # Use a different divisor for real-time data pulled directly from vCenter
+                            # Based on your logs, vCenter direct values need a higher divisor
+                            vcenter_realtime_divisor = 3000  # Adjusted divisor for vCenter direct API values
+                            print(f"DEBUG: Applying vCenter direct Real-Time formula (divisor: {vcenter_realtime_divisor})")
+                            subset['CPU_Ready_Percent'] = subset['CPU_Ready_Sum'] / vcenter_realtime_divisor
                         else:
-                            print(f"DEBUG: Processing {self.current_interval} data")
-                            max_possible_ms = interval_seconds * 1000
-                            
-                            if avg_sample > max_possible_ms * 10:
-                                # Very high - likely microseconds
-                                subset['CPU_Ready_Percent'] = (subset['CPU_Ready_Sum'] / (max_possible_ms * 1000)) * 100
-                                conversion_applied = "historical_microseconds"
-                            elif avg_sample > max_possible_ms:
-                                # High - standard milliseconds  
-                                subset['CPU_Ready_Percent'] = (subset['CPU_Ready_Sum'] / max_possible_ms) * 100
-                                conversion_applied = "historical_milliseconds"
-                            elif avg_sample > 1000:
-                                # Medium - conservative milliseconds
-                                subset['CPU_Ready_Percent'] = (subset['CPU_Ready_Sum'] / max_possible_ms) * 100
-                                conversion_applied = "historical_standard"
-                            elif avg_sample > 100:
-                                # Low-medium - centipercent
-                                subset['CPU_Ready_Percent'] = subset['CPU_Ready_Sum'] / 100
-                                conversion_applied = "historical_centipercent"
-                            else:
-                                # Low - direct or minor conversion
-                                subset['CPU_Ready_Percent'] = subset['CPU_Ready_Sum']
-                                conversion_applied = "historical_direct"
+                            # Use standard formula for CSV files and other intervals
+                            print(f"DEBUG: Applying standard {self.current_interval} formula (divisor: {current_divisor})")
+                            subset['CPU_Ready_Percent'] = subset['CPU_Ready_Sum'] / current_divisor
                         
-                        # Post-conversion validation
-                        post_avg = subset['CPU_Ready_Percent'].mean()
-                        post_max = subset['CPU_Ready_Percent'].max()
-                        
-                        print(f"DEBUG: After conversion - Avg: {post_avg:.3f}%, Max: {post_max:.3f}%")
-                        print(f"DEBUG: Conversion applied: {conversion_applied}")
-                        
-                        # EMERGENCY CORRECTION for impossible values
-                        if post_avg > 100:  # Impossible - more than 100% CPU Ready
-                            print(f"DEBUG: EMERGENCY: Impossible values detected ({post_avg:.1f}%), applying emergency fix")
-                            
-                            # Try progressively more conservative conversions
-                            emergency_conversions = [
-                                subset['CPU_Ready_Sum'] / 1000,   # Treat as permille
-                                subset['CPU_Ready_Sum'] / 10000,  # Very conservative
-                                subset['CPU_Ready_Sum'] / 100000, # Ultra conservative
-                            ]
-                            
-                            for i, emergency_result in enumerate(emergency_conversions):
-                                emergency_avg = emergency_result.mean()
-                                if 0.001 <= emergency_avg <= 50:  # Reasonable range
-                                    subset['CPU_Ready_Percent'] = emergency_result
-                                    conversion_applied = f"emergency_fix_{i+1}"
-                                    print(f"DEBUG: Emergency fix {i+1} applied: {emergency_avg:.3f}%")
-                                    break
-                            else:
-                                # Last resort - just cap the values
-                                subset['CPU_Ready_Percent'] = subset['CPU_Ready_Percent'] / 100
-                                conversion_applied = "emergency_cap"
-                                print(f"DEBUG: Emergency cap applied")
-                        
-                        # Cap any remaining outliers
+                        # Cap at 100% (sanity check)
                         subset.loc[subset['CPU_Ready_Percent'] > 100, 'CPU_Ready_Percent'] = 100
-                        subset.loc[subset['CPU_Ready_Percent'] < 0, 'CPU_Ready_Percent'] = 0
                         
                         # Final statistics
                         final_avg = subset['CPU_Ready_Percent'].mean()
@@ -5109,20 +5082,7 @@ class ModernCPUAnalyzer:
                         final_std = subset['CPU_Ready_Percent'].std()
                         
                         print(f"DEBUG: Host {hostname} - FINAL stats:")
-                        print(f"  Avg: {final_avg:.3f}%, Max: {final_max:.3f}%, Min: {final_min:.3f}%")
-                        print(f"  Conversion: {conversion_applied}")
-                        
-                        # Validation warnings
-                        if final_avg > 50:
-                            warning_msg = f"Host {hostname}: Very high CPU Ready ({final_avg:.1f}%) - check data source"
-                            processing_warnings.append(warning_msg)
-                        elif final_avg < 0.001:
-                            warning_msg = f"Host {hostname}: Very low CPU Ready ({final_avg:.4f}%) - check conversion"
-                            processing_warnings.append(warning_msg)
-                        
-                        print(f"DEBUG: Host {hostname} - FINAL stats:")
                         print(f"  Min: {final_min:.2f}%, Max: {final_max:.2f}%, Avg: {final_avg:.2f}%, Std: {final_std:.2f}%")
-                        print(f"  Conversion applied: {conversion_applied}")
                         print(f"  Sample final values: {subset['CPU_Ready_Percent'].head(5).tolist()}")
         
                         # Quality warnings
@@ -6524,7 +6484,7 @@ Thresholds: Warning {warning_level}% | Critical {critical_level}%
         title_label.pack(pady=(0, 5))
         
         version_label = tk.Label(header_frame,
-                                text="Version 2.0 - Real-Time Edition",
+                                text="Version 2.1 - Real-Time Edition",
                                 bg=self.colors['bg_primary'],
                                 fg=self.colors['accent_blue'],
                                 font=('Segoe UI', 12, 'bold'))
@@ -6539,7 +6499,7 @@ Thresholds: Warning {warning_level}% | Critical {critical_level}%
         description_label.pack()
         
         # What's New Section (NEW)
-        whats_new_section = tk.LabelFrame(main_container, text="  🚀 What's New in Version 2.0  ",
+        whats_new_section = tk.LabelFrame(main_container, text="  🚀 What's New in Version 2.1  ",
                                         bg=self.colors['bg_primary'],
                                         fg=self.colors['success'],
                                         font=('Segoe UI', 12, 'bold'),
@@ -6847,7 +6807,7 @@ Thresholds: Warning {warning_level}% | Critical {critical_level}%
         developed for enterprise infrastructure
         analysis and optimization.
 
-        Version 2.0 introduces real-time monitoring
+        Version 2.1 introduces real-time monitoring
         capabilities and AI-powered consolidation
         recommendations for modern vSphere environments.
 

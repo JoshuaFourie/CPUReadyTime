@@ -10,7 +10,7 @@ PyInstaller.__main__.run([
     main_script,
     '--onefile',                    # Create a single executable file
     '--windowed',                   # Don't show console window (GUI app)
-    '--name=vCenter_CPU_Analyser_v2',  # Updated name for version 2
+    '--name=vCenter_CPU_Analyser_v2.1',  # Updated name for version 2
     '--icon=app_icon.ico',          # Optional: add an icon file
     '--add-data=README.txt;.',      # Optional: include additional files
     
